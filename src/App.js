@@ -24,18 +24,11 @@ function addDaysISO(isoStr, days) {
   const base = isoStr ? new Date(isoStr) : new Date();
   if (Number.isNaN(+base)) return todayISO();
   base.setDate(base.getDate() + Number(days || 0));
-  return base.toISOString().split("T")[0];
+  return base.toISOString().slice(0, 10);
 }
 
 const GSTIN_REGEX = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/i;
 const GST_RATES = [2.5, 5, 8, 9, 18, 28]; // make sure this matches everywhere
-
-function addDaysISO(isoStr, days) {
-  const base = isoStr ? new Date(isoStr) : new Date();
-  if (Number.isNaN(+base)) return todayISO();
-  base.setDate(base.getDate() + Number(days || 0));
-  return base.toISOString().split("T")[0];
-}
 
 const calcItem = (item) => {
   const qty = Math.max(0, safeNum(item.quantity));
