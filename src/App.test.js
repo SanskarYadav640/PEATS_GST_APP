@@ -1137,3 +1137,225 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
         <div className="flex justify-between text-sm"><span>Sub Total:</span><span>{fmtInr(subTotal)}</span></div>
         <div className="flex justify-between text-sm"><span>Total Tax:</span><span>{fmtInr(totalTax)}</span></div>
         <div className="flex justify-between font-bold"><span>Grand Total:</span><span>{fmtInr(totalAmount)}</span></div
+      {/* Actions */}
+      <div className="flex justify-end gap-3 pt-4">
+        <button type="button" onClick={onCancel} className="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Cancel</button>
+        <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700">Save Invoice</button>
+      </div>
+    </form>
+  );
+};
+
+const CustomerForm = ({ onSave, onCancel, existingCustomer }) => {
+  const [c, setC] = useState(() =>
+    existingCustomer || { id: null, name: "", email: "", phone: "", address: "", gstin: "" }
+  );
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (!c.name) return alert("Name is required");
+    if (c.gstin && !GSTIN_REGEX.test(c.gstin)) {
+      if (!window.confirm("GSTIN does not look valid. Save anyway?")) return;
+    }
+    onSave(c);
+  };
+
+  return (
+    <form onSubmit={submit} className="bg-white p-6 rounded-xl shadow space-y-4">
+      <Input label="Customer Name" value={c.name} onChange={(e) => setC({ ...c, name: e.target.value })} required />
+      <Input label="Email" value={c.email} onChange={(e) => setC({ ...c, email: e.target.value })} />
+      <Input label="Phone" value={c.phone} onChange={(e) => setC({ ...c, phone: e.target.value })} />
+      <Input label="Address" value={c.address} onChange={(e) => setC({ ...c, address: e.target.value })} />
+      <Input label="GSTIN" value={c.gstin} onChange={(e) => setC({ ...c, gstin: e.target.value.toUpperCase() })} />
+      <div className="flex justify-end gap-3">
+        <button type="button" onClick={onCancel} className="px-4 py-2 bg-gray-200 rounded">Cancel</button>
+        <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded">Save</button>
+      </div>
+    </form>
+  );
+};
+
+/* ------------------------------ Shared Helpers ------------------------------ */
+const Input = ({ label, ...props }) => (
+  <div>
+    <label className="mb-1 block text-sm text-gray-600">{label}</label>
+    <input {...props} className={`p-2 border rounded-lg w-full ${props.className || ""}`} />
+  </div>
+);
+
+const loadLS = (key, fallback) => {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+};
+const saveLS = (key, val) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(val));
+  } catch {}
+};
+
+const cmp = (a, b, key, dir) => {
+  const va = a?.[key] ?? "";
+  const vb = b?.[key] ?? "";
+  if (va < vb) return dir === "asc" ? -1 : 1;
+  if (va > vb) return dir === "asc" ? 1 : -1;
+  return 0;
+};
+
+/* ------------------------------ Printable Invoice (A4 boxed) ------------------------------ */
+function generatePrintableInvoice(inv) {
+  const itemsHtml = (inv.items || [])
+    .map((it, idx) => {
+      const { taxable, cgstAmt, sgstAmt, igstAmt, total } = calcItem(it);
+      return `<tr>
+        <td style="text-align:center">${idx + 1}</td>
+        <td>${escapeHtml(it.description || "")}</td>
+        <td style="text-align:center">${escapeHtml(it.hsn || "")}</td>
+        <td style="text-align:right">${safeNum(it.quantity).toFixed(2)}</td>
+        <td style="text-align:right">${safeNum(it.rate).toFixed(2)}</td>
+        <td style="text-align:right">${taxable.toFixed(2)}</td>
+        <td style="text-align:right">${cgstAmt.toFixed(2)}</td>
+        <td style="text-align:right">${sgstAmt.toFixed(2)}</td>
+        <td style="text-align:right">${igstAmt.toFixed(2)}</td>
+        <td style="text-align:right; font-weight:600">${total.toFixed(2)}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const subTotal = round2(sum(inv.items.map(calcItem), "taxable"));
+  const totalCgst = round2(sum(inv.items.map(calcItem), "cgstAmt"));
+  const totalSgst = round2(sum(inv.items.map(calcItem), "sgstAmt"));
+  const totalIgst = round2(sum(inv.items.map(calcItem), "igstAmt"));
+  const grandTotal = round2(safeNum(inv.totalAmount));
+
+  const dueInfo = inv.dueDate ? `Due Date: ${inv.dueDate}` : "";
+  const poBlock = `
+    <div style="margin-top:6px">
+      <strong>PO No:</strong> ${escapeHtml(inv.poNumber || "—")}
+      ${inv.poImage ? `&nbsp;&nbsp;|&nbsp;&nbsp;<a href="${inv.poImage}" target="_blank">View PO Image</a>` : ""}
+    </div>`;
+
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeHtml(inv.invoiceNumber || "Invoice")}</title>
+  <style>
+    @page { size: A4; margin: 14mm; }
+    body { font-family: Arial, sans-serif; color:#222; }
+    .sheet {
+      border: 2px solid #111;
+      border-radius: 6px;
+      padding: 14px 16px;
+    }
+    .row { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
+    .muted { color:#666; }
+    h1 { font-size:18px; margin:0; }
+    h2 { font-size:14px; margin:0 0 8px 0; }
+    .hr { height:1px; background:#ddd; margin:10px 0; }
+    table { width:100%; border-collapse: collapse; }
+    th, td { border:1px solid #333; padding:6px 8px; font-size:12px; }
+    th { background:#f5f5f5; text-align:center; }
+    .totals td { border:none; padding:3px 0; font-size:12px; }
+    .totals .label { text-align:right; padding-right:8px; }
+    .totals .value { text-align:right; width:120px; font-weight:600; }
+    .footer { margin-top:18px; text-align:center; font-size:11px; color:#666; }
+  </style>
+</head>
+<body>
+  <div class="sheet">
+    <div class="row">
+      <div>
+        <h1>${escapeHtml(companyDetails.name)}</h1>
+        <div>${escapeHtml(companyDetails.address)}</div>
+        <div>Phone: ${escapeHtml(companyDetails.phone)} &nbsp;|&nbsp; Email: ${escapeHtml(companyDetails.email)}</div>
+        <div class="muted">Owners: ${escapeHtml(companyDetails.owners)}</div>
+      </div>
+      <div style="text-align:right">
+        <h2>Tax Invoice</h2>
+        <div><strong>Invoice #:</strong> ${escapeHtml(inv.invoiceNumber || "")}</div>
+        <div><strong>Date:</strong> ${escapeHtml(inv.invoiceDate || "")}</div>
+        <div><strong>Status:</strong> ${escapeHtml((inv.status || "pending").toUpperCase())}</div>
+        <div>${escapeHtml(dueInfo)}</div>
+        ${poBlock}
+      </div>
+    </div>
+
+    <div class="hr"></div>
+
+    <div class="row" style="margin-bottom:8px">
+      <div>
+        <h2>Bill To</h2>
+        <div><strong>${escapeHtml(inv.customerName || "")}</strong></div>
+        <div>${escapeHtml(inv.customerAddress || "—")}</div>
+        <div>GSTIN: ${escapeHtml(inv.customerGstin || "—")}</div>
+        <div>Email: ${escapeHtml(inv.customerEmail || "—")}</div>
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th style="width:42px">#</th>
+          <th>Description</th>
+          <th style="width:90px">HSN/SAC</th>
+          <th style="width:70px">Qty</th>
+          <th style="width:90px">Rate</th>
+          <th style="width:100px">Taxable</th>
+          <th style="width:85px">CGST</th>
+          <th style="width:85px">SGST</th>
+          <th style="width:85px">IGST</th>
+          <th style="width:110px">Line Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${itemsHtml || `<tr><td colspan="10" style="text-align:center">No items</td></tr>`}
+      </tbody>
+    </table>
+
+    <table style="margin-top:10px; border:none">
+      <tbody class="totals">
+        <tr>
+          <td class="label">Sub Total:</td>
+          <td class="value">${subTotal.toFixed(2)}</td>
+        </tr>
+        <tr>
+          <td class="label">CGST Total:</td>
+          <td class="value">${totalCgst.toFixed(2)}</td>
+        </tr>
+        <tr>
+          <td class="label">SGST Total:</td>
+          <td class="value">${totalSgst.toFixed(2)}</td>
+        </tr>
+        <tr>
+          <td class="label">IGST Total:</td>
+          <td class="value">${totalIgst.toFixed(2)}</td>
+        </tr>
+        <tr>
+          <td class="label" style="font-size:13px"><strong>Grand Total:</strong></td>
+          <td class="value" style="font-size:13px"><strong>${grandTotal.toFixed(2)}</strong></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="footer">
+      This is a computer-generated invoice. No signature required.
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+/* small util for print escaping */
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+// DEBUG sentinel to confirm file parses fully
+console.log("✅ App.js loaded");
