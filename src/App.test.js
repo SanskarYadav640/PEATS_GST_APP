@@ -6,11 +6,11 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
  * PEATS — GST Invoice System
  * Features:
  * - Local persistence (invoices/customers)
- * - Excel import/export (SheetJS) with PO + Status + Email
+ * - Excel import/export (SheetJS) with PO + Status + Email columns
  * - Invoice status (pending/paid) editable from list & form
- * - PO Number + PO Image upload
+ * - PO Number + PO Image upload (stored as dataURL)
  * - Reports: received, remaining, days remaining/overdue, Gmail reminders
- * - Printable A4 invoice with box and PO details
+ * - Printable A4 invoice with boxed layout and PO details
  */
 
 /* ------------------------------ Utils & Constants ------------------------------ */
@@ -161,20 +161,32 @@ export default function App() {
 
   // Load SheetJS robustly (with fallback)
   useEffect(() => {
-    if (window.XLSX) { setXlsxReady(true); return; }
+    if (window.XLSX) {
+      setXlsxReady(true);
+      return;
+    }
     function addScript(src, onload) {
       const s = document.createElement("script");
-      s.src = src; s.async = true;
+      s.src = src;
+      s.async = true;
       s.onload = onload;
       s.onerror = () => console.error("Failed to load", src);
       document.head.appendChild(s);
       return s;
     }
-    const primary = addScript("https://cdn.sheetjs.com/xlsx-0.20.1/package/xlsx.full.min.js", () => setXlsxReady(!!window.XLSX));
+    const primary = addScript("https://cdn.sheetjs.com/xlsx-0.20.1/package/xlsx.full.min.js", () =>
+      setXlsxReady(!!window.XLSX)
+    );
     const t = setTimeout(() => {
-      if (!window.XLSX) addScript("https://unpkg.com/xlsx@0.20.1/dist/xlsx.full.min.js", () => setXlsxReady(!!window.XLSX));
+      if (!window.XLSX)
+        addScript("https://unpkg.com/xlsx@0.20.1/dist/xlsx.full.min.js", () =>
+          setXlsxReady(!!window.XLSX)
+        );
     }, 2000);
-    return () => { primary && primary.remove(); clearTimeout(t); };
+    return () => {
+      primary && primary.remove();
+      clearTimeout(t);
+    };
   }, []);
 
   // Persist to localStorage
@@ -236,7 +248,10 @@ export default function App() {
         return (
           <InvoiceListView
             invoices={invoices}
-            onEdit={(inv) => { setEditingInvoice(inv); setCurrentView("invoiceForm"); }}
+            onEdit={(inv) => {
+              setEditingInvoice(inv);
+              setCurrentView("invoiceForm");
+            }}
             onDelete={deleteData}
             onDuplicate={duplicateInvoice}
             onQuickUpdate={quickUpdateInvoice}
@@ -247,7 +262,10 @@ export default function App() {
           <InvoiceForm
             customers={customers}
             allInvoices={invoices}
-            onSave={(data) => { saveData("invoice", data); handleSetView("invoices"); }}
+            onSave={(data) => {
+              saveData("invoice", data);
+              handleSetView("invoices");
+            }}
             onCancel={() => handleSetView("invoices")}
             existingInvoice={editingInvoice}
           />
@@ -256,14 +274,20 @@ export default function App() {
         return (
           <CustomerListView
             customers={customers}
-            onEdit={(c) => { setEditingCustomer(c); setCurrentView("customerForm"); }}
+            onEdit={(c) => {
+              setEditingCustomer(c);
+              setCurrentView("customerForm");
+            }}
             onDelete={deleteData}
           />
         );
       case "customerForm":
         return (
           <CustomerForm
-            onSave={(data) => { saveData("customer", data); handleSetView("customers"); }}
+            onSave={(data) => {
+              saveData("customer", data);
+              handleSetView("customers");
+            }}
             onCancel={() => handleSetView("customers")}
             existingCustomer={editingCustomer}
           />
@@ -314,7 +338,7 @@ const Sidebar = ({ currentView, setView }) => {
           </li>
         ))}
       </ul>
-      <div className="p-4 text-xs text-gray-400">v1.3</div>
+      <div className="p-4 text-xs text-gray-400">v1.4</div>
     </nav>
   );
 };
@@ -411,7 +435,9 @@ const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxRea
             hsn: row["HSN/SAC"] ?? row["hsn"] ?? "",
             quantity: safeNum(row["Quantity"] ?? row["qty"] ?? 0),
             rate: safeNum(row["Rate"] ?? 0),
-            cgst, sgst, igst,
+            cgst,
+            sgst,
+            igst,
             gstMode: mode,
             gstRate: gstRate,
             total: safeNum(row["Total Item Value"] ?? row["line_total"] ?? 0),
@@ -451,7 +477,9 @@ const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxRea
           <button
             disabled={!xlsxReady}
             onClick={() => fileRef.current?.click()}
-            className={`inline-flex items-center px-4 py-2 rounded-lg shadow ${xlsxReady ? "bg-blue-600 text-white hover:bg-blue-700" : "bg-gray-200 text-gray-500 cursor-not-allowed"}`}
+            className={`inline-flex items-center px-4 py-2 rounded-lg shadow ${
+              xlsxReady ? "bg-blue-600 text-white hover:bg-blue-700" : "bg-gray-200 text-gray-500 cursor-not-allowed"
+            }`}
           >
             <Icon path={ICONS.upload} className="w-5 h-5 mr-2" /> Import from Excel
           </button>
@@ -506,7 +534,8 @@ const ExportExcelButton = ({ invoices, disabled }) => {
           Quantity: item.quantity,
           Rate: item.rate,
           "GST Mode": item.gstMode || (safeNum(item.igst) > 0 ? "igst" : "cgst_sgst"),
-          "GST %": item.gstRate ?? (safeNum(item.igst) > 0 ? safeNum(item.igst) : safeNum(item.cgst) + safeNum(item.sgst)),
+          "GST %":
+            item.gstRate ?? (safeNum(item.igst) > 0 ? safeNum(item.igst) : safeNum(item.cgst) + safeNum(item.sgst)),
           "Taxable Value": taxable,
           "CGST Rate (%)": item.cgst,
           "CGST Amount": cgstAmt,
@@ -524,7 +553,9 @@ const ExportExcelButton = ({ invoices, disabled }) => {
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Invoices");
     const buf = XLSX.write(wb, { bookType: "xlsx", type: "array" });
-    const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;charset=UTF-8" });
+    const blob = new Blob([buf], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;charset=UTF-8",
+    });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -541,7 +572,9 @@ const ExportExcelButton = ({ invoices, disabled }) => {
     <button
       disabled={disabled}
       onClick={exportToExcel}
-      className={`inline-flex items-center px-4 py-2 rounded-lg shadow ${disabled ? "bg-gray-200 text-gray-500 cursor-not-allowed" : "bg-green-600 text-white hover:bg-green-700"}`}
+      className={`inline-flex items-center px-4 py-2 rounded-lg shadow ${
+        disabled ? "bg-gray-200 text-gray-500 cursor-not-allowed" : "bg-green-600 text-white hover:bg-green-700"
+      }`}
     >
       <Icon path={ICONS.download} className="w-5 h-5 mr-2" /> Export Excel
     </button>
@@ -564,7 +597,10 @@ const ExportJsonButton = ({ invoices, customers }) => {
     }, 0);
   };
   return (
-    <button onClick={onClick} className="inline-flex items-center px-4 py-2 rounded-lg shadow bg-gray-800 text-white hover:bg-black">
+    <button
+      onClick={onClick}
+      className="inline-flex items-center px-4 py-2 rounded-lg shadow bg-gray-800 text-white hover:bg-black"
+    >
       <Icon path={ICONS.download} className="w-5 h-5 mr-2" /> Backup JSON
     </button>
   );
@@ -579,11 +615,15 @@ const ClearDataButton = ({ setInvoices, setCustomers }) => {
     localStorage.removeItem(LS_KEYS.customers);
   };
   return (
-    <button onClick={clearAll} className="inline-flex items-center px-4 py-2 rounded-lg shadow bg-red-50 text-red-700 hover:bg-red-100">
+    <button
+      onClick={clearAll}
+      className="inline-flex items-center px-4 py-2 rounded-lg shadow bg-red-50 text-red-700 hover:bg-red-100"
+    >
       <Icon path={ICONS.delete} className="w-5 h-5 mr-2" /> Clear Local Data
     </button>
   );
 };
+
 /* ------------------------------ Invoices List ------------------------------ */
 const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate, onQuickUpdate }) => {
   const [query, setQuery] = useState("");
@@ -625,7 +665,10 @@ const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate, onQuickUpdat
 
   const toggleSort = (key) => {
     if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-    else { setSortKey(key); setSortDir("asc"); }
+    else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
   };
 
   const th = (label, key, width) => (
@@ -690,7 +733,9 @@ const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate, onQuickUpdat
                     <select
                       value={inv.status}
                       onChange={(e) => onQuickUpdate({ ...inv, status: e.target.value })}
-                      className={`px-2 py-1 border rounded-lg ${inv.status === "paid" ? "bg-green-50 text-green-700" : "bg-amber-50 text-amber-700"}`}
+                      className={`px-2 py-1 border rounded-lg ${
+                        inv.status === "paid" ? "bg-green-50 text-green-700" : "bg-amber-50 text-amber-700"
+                      }`}
                     >
                       <option value="pending">Pending</option>
                       <option value="paid">Paid</option>
@@ -699,9 +744,21 @@ const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate, onQuickUpdat
                   <td className="p-3">
                     <div className="flex items-center gap-1">
                       <IconBtn title="Edit" onClick={() => onEdit(inv)} icon={ICONS.edit} className="text-blue-600 hover:bg-blue-50" />
-                      <IconBtn title="Duplicate" onClick={() => onDuplicate(inv)} icon={ICONS.duplicate} className="text-purple-600 hover:bg-purple-50" />
-                      <IconBtn title="Delete" onClick={() => handleDelete(inv.id)} icon={ICONS.delete} className="text-red-600 hover:bg-red-50" />
-                      <a href={mailto} target="_blank" rel="noreferrer" title="Send Reminder" className="p-2 rounded-lg text-amber-700 hover:bg-amber-50">✉</a>
+                      <IconBtn
+                        title="Duplicate"
+                        onClick={() => onDuplicate(inv)}
+                        icon={ICONS.duplicate}
+                        className="text-purple-600 hover:bg-purple-50"
+                      />
+                      <IconBtn
+                        title="Delete"
+                        onClick={() => handleDelete(inv.id)}
+                        icon={ICONS.delete}
+                        className="text-red-600 hover:bg-red-50"
+                      />
+                      <a href={mailto} target="_blank" rel="noreferrer" title="Send Reminder" className="p-2 rounded-lg text-amber-700 hover:bg-amber-50">
+                        ✉
+                      </a>
                       <IconBtn title="Print" onClick={() => handlePrint(inv)} icon={ICONS.print} className="text-gray-700 hover:bg-gray-100" />
                     </div>
                   </td>
@@ -710,7 +767,9 @@ const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate, onQuickUpdat
             })}
             {pageData.length === 0 && (
               <tr>
-                <td colSpan={6} className="p-6 text-center text-gray-500">No invoices match your filters.</td>
+                <td colSpan={6} className="p-6 text-center text-gray-500">
+                  No invoices match your filters.
+                </td>
               </tr>
             )}
           </tbody>
@@ -724,9 +783,19 @@ const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate, onQuickUpdat
 
 const Pagination = ({ page, totalPages, onPageChange }) => (
   <div className="flex items-center justify-end gap-2 mt-4">
-    <button onClick={() => onPageChange(Math.max(1, page - 1))} className="px-3 py-1 border rounded-lg disabled:opacity-50" disabled={page === 1}>Prev</button>
-    <span className="text-sm text-gray-600">Page <strong>{page}</strong> of <strong>{totalPages}</strong></span>
-    <button onClick={() => onPageChange(Math.min(totalPages, page + 1))} className="px-3 py-1 border rounded-lg disabled:opacity-50" disabled={page === totalPages}>Next</button>
+    <button onClick={() => onPageChange(Math.max(1, page - 1))} className="px-3 py-1 border rounded-lg disabled:opacity-50" disabled={page === 1}>
+      Prev
+    </button>
+    <span className="text-sm text-gray-600">
+      Page <strong>{page}</strong> of <strong>{totalPages}</strong>
+    </span>
+    <button
+      onClick={() => onPageChange(Math.min(totalPages, page + 1))}
+      className="px-3 py-1 border rounded-lg disabled:opacity-50"
+      disabled={page === totalPages}
+    >
+      Next
+    </button>
   </div>
 );
 
@@ -735,7 +804,6 @@ const IconBtn = ({ onClick, icon, title, className = "" }) => (
     <Icon path={icon} />
   </button>
 );
-
 /* ------------------------------ Customers ------------------------------ */
 const CustomerListView = ({ customers, onEdit, onDelete }) => {
   const [query, setQuery] = useState("");
@@ -788,7 +856,9 @@ const CustomerListView = ({ customers, onEdit, onDelete }) => {
             ))}
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={4} className="p-6 text-center text-gray-500">No customers found.</td>
+                <td colSpan={4} className="p-6 text-center text-gray-500">
+                  No customers found.
+                </td>
               </tr>
             )}
           </tbody>
@@ -811,7 +881,7 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
       .filter((i) => i.status !== "paid")
       .map((i) => {
         const d = daysUntilDue(i.dueDate);
-        // try to ensure customer email present
+        // ensure a customer email is available
         let email = i.customerEmail || "";
         if (!email && i.customerId) {
           const c = customers.find((x) => x.id === i.customerId);
@@ -828,9 +898,9 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
         };
       })
       .sort((a, b) => {
-        // sort by most overdue first
-        const da = a.days ?? 9999, db = b.days ?? 9999;
-        return da - db;
+        const da = a.days ?? 9999,
+          db = b.days ?? 9999;
+        return da - db; // most overdue first
       });
   }, [invoices, customers]);
 
@@ -871,11 +941,19 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
                 });
                 const link = buildGmailLink({ to: r.customerEmail || "", subject, body });
                 const badge =
-                  typeof r.days === "number"
-                    ? r.days < 0
-                      ? <span className="px-2 py-1 rounded-full text-xs bg-red-100 text-red-800">{Math.abs(r.days)} day(s) overdue</span>
-                      : <span className="px-2 py-1 rounded-full text-xs bg-amber-100 text-amber-800">{r.days} day(s) remaining</span>
-                    : <span className="px-2 py-1 rounded-full text-xs bg-gray-100 text-gray-700">—</span>;
+                  typeof r.days === "number" ? (
+                    r.days < 0 ? (
+                      <span className="px-2 py-1 rounded-full text-xs bg-red-100 text-red-800">
+                        {Math.abs(r.days)} day(s) overdue
+                      </span>
+                    ) : (
+                      <span className="px-2 py-1 rounded-full text-xs bg-amber-100 text-amber-800">
+                        {r.days} day(s) remaining
+                      </span>
+                    )
+                  ) : (
+                    <span className="px-2 py-1 rounded-full text-xs bg-gray-100 text-gray-700">—</span>
+                  );
 
                 return (
                   <tr key={r.id} className="border-b hover:bg-gray-50">
@@ -886,13 +964,19 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
                     <td className="p-3">{badge}</td>
                     <td className="p-3">{fmtInr(r.amount)}</td>
                     <td className="p-3">
-                      <a href={link} target="_blank" rel="noreferrer" className="px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700">Send Reminder</a>
+                      <a href={link} target="_blank" rel="noreferrer" className="px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700">
+                        Send Reminder
+                      </a>
                     </td>
                   </tr>
                 );
               })}
               {pendingRows.length === 0 && (
-                <tr><td colSpan={7} className="p-6 text-center text-gray-500">No pending invoices 🎉</td></tr>
+                <tr>
+                  <td colSpan={7} className="p-6 text-center text-gray-500">
+                    No pending invoices 🎉
+                  </td>
+                </tr>
               )}
             </tbody>
           </table>
@@ -922,7 +1006,20 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
       poImage: existingInvoice?.poImage || "",
       items: existingInvoice?.items?.length
         ? existingInvoice.items
-        : [{ description: "", hsn: "", quantity: 1, rate: 0, cgst: 0, sgst: 0, igst: 0, gstMode: "cgst_sgst", gstRate: 18, total: 0 }],
+        : [
+            {
+              description: "",
+              hsn: "",
+              quantity: 1,
+              rate: 0,
+              cgst: 0,
+              sgst: 0,
+              igst: 0,
+              gstMode: "cgst_sgst",
+              gstRate: 18,
+              total: 0,
+            },
+          ],
       status: existingInvoice?.status || "pending",
     };
   });
@@ -958,9 +1055,13 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
   const applyGstModeRate = (it) => {
     const rate = safeNum(it.gstRate);
     if ((it.gstMode || "cgst_sgst") === "igst") {
-      it.igst = round2(rate); it.cgst = 0; it.sgst = 0;
+      it.igst = round2(rate);
+      it.cgst = 0;
+      it.sgst = 0;
     } else {
-      it.cgst = round2(rate / 2); it.sgst = round2(rate / 2); it.igst = 0;
+      it.cgst = round2(rate / 2);
+      it.sgst = round2(rate / 2);
+      it.igst = 0;
     }
     return it;
   };
@@ -976,13 +1077,18 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
 
       if (field === "gstMode") it.gstMode = value;
       if (field === "gstRate" || field === "gstMode") {
-        it.gstRate = field === "gstRate" ? safeNum(value) : (it.gstRate ?? 0);
+        it.gstRate = field === "gstRate" ? safeNum(value) : it.gstRate ?? 0;
         it = applyGstModeRate(it);
       }
 
       if (["cgst", "sgst", "igst"].includes(field)) {
-        if (it.igst > 0) { it.gstMode = "igst"; it.gstRate = round2(it.igst); }
-        else { it.gstMode = "cgst_sgst"; it.gstRate = round2(safeNum(it.cgst) + safeNum(it.sgst)); }
+        if (it.igst > 0) {
+          it.gstMode = "igst";
+          it.gstRate = round2(it.igst);
+        } else {
+          it.gstMode = "cgst_sgst";
+          it.gstRate = round2(safeNum(it.cgst) + safeNum(it.sgst));
+        }
       }
 
       const { total } = calcItem(it);
@@ -996,7 +1102,10 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
   const addItem = () =>
     setInvoice((prev) => ({
       ...prev,
-      items: [...prev.items, { description: "", hsn: "", quantity: 1, rate: 0, cgst: 0, sgst: 0, igst: 0, gstMode: "cgst_sgst", gstRate: 18, total: 0 }],
+      items: [
+        ...prev.items,
+        { description: "", hsn: "", quantity: 1, rate: 0, cgst: 0, sgst: 0, igst: 0, gstMode: "cgst_sgst", gstRate: 18, total: 0 },
+      ],
     }));
 
   const removeItem = (idx) => setInvoice((prev) => ({ ...prev, items: prev.items.filter((_, i) => i !== idx) }));
@@ -1018,13 +1127,24 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
           <label className="mb-1 block text-sm text-gray-600">Invoice #</label>
           <input
             value={invoice.invoiceNumber}
-            onChange={(e) => { setTouchedNumber(true); setInvoice({ ...invoice, invoiceNumber: e.target.value }); }}
+            onChange={(e) => {
+              setTouchedNumber(true);
+              setInvoice({ ...invoice, invoiceNumber: e.target.value });
+            }}
             className="p-2 border rounded-lg w-full"
             required
           />
-          <p className="text-xs text-gray-500 mt-1">Format: <code>PINV/YYYY/MM/DD980001</code></p>
+          <p className="text-xs text-gray-500 mt-1">
+            Format: <code>PINV/YYYY/MM/DD980001</code>
+          </p>
         </div>
-        <Input label="Invoice Date" type="date" value={invoice.invoiceDate} onChange={(e) => setInvoice({ ...invoice, invoiceDate: e.target.value })} required />
+        <Input
+          label="Invoice Date"
+          type="date"
+          value={invoice.invoiceDate}
+          onChange={(e) => setInvoice({ ...invoice, invoiceDate: e.target.value })}
+          required
+        />
         <Input label="Due Date" type="date" value={invoice.dueDate} onChange={(e) => setInvoice({ ...invoice, dueDate: e.target.value })} />
       </div>
 
@@ -1035,7 +1155,11 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
             <label className="mb-1 block text-sm text-gray-600">Select Customer</label>
             <select value={invoice.customerId} onChange={onSelectCustomer} className="p-2 border rounded-lg w-full bg-white">
               <option value="">— Select Existing —</option>
-              {customers.map((c) => (<option key={c.id} value={c.id}>{c.name}</option>))}
+              {customers.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
             </select>
           </div>
           <Input label="Customer Name" value={invoice.customerName} onChange={(e) => setInvoice({ ...invoice, customerName: e.target.value })} required />
@@ -1106,10 +1230,18 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
                 const { total } = calcItem(it);
                 return (
                   <tr key={idx} className="border-t">
-                    <td className="p-2"><input value={it.description} onChange={(e) => updateItem(idx, "description", e.target.value)} className="p-1 border rounded w-40" /></td>
-                    <td className="p-2"><input value={it.hsn} onChange={(e) => updateItem(idx, "hsn", e.target.value)} className="p-1 border rounded w-24" /></td>
-                    <td className="p-2"><input type="number" value={it.quantity} onChange={(e) => updateItem(idx, "quantity", e.target.value)} className="p-1 border rounded w-16" /></td>
-                    <td className="p-2"><input type="number" value={it.rate} onChange={(e) => updateItem(idx, "rate", e.target.value)} className="p-1 border rounded w-20" /></td>
+                    <td className="p-2">
+                      <input value={it.description} onChange={(e) => updateItem(idx, "description", e.target.value)} className="p-1 border rounded w-40" />
+                    </td>
+                    <td className="p-2">
+                      <input value={it.hsn} onChange={(e) => updateItem(idx, "hsn", e.target.value)} className="p-1 border rounded w-24" />
+                    </td>
+                    <td className="p-2">
+                      <input type="number" value={it.quantity} onChange={(e) => updateItem(idx, "quantity", e.target.value)} className="p-1 border rounded w-16" />
+                    </td>
+                    <td className="p-2">
+                      <input type="number" value={it.rate} onChange={(e) => updateItem(idx, "rate", e.target.value)} className="p-1 border rounded w-20" />
+                    </td>
                     <td className="p-2">
                       <select value={it.gstMode} onChange={(e) => updateItem(idx, "gstMode", e.target.value)} className="p-1 border rounded">
                         <option value="cgst_sgst">CGST+SGST</option>
@@ -1118,38 +1250,61 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
                     </td>
                     <td className="p-2">
                       <select value={it.gstRate} onChange={(e) => updateItem(idx, "gstRate", e.target.value)} className="p-1 border rounded">
-                        {GST_RATES.map((r) => (<option key={r} value={r}>{r}%</option>))}
+                        {GST_RATES.map((r) => (
+                          <option key={r} value={r}>
+                            {r}%
+                          </option>
+                        ))}
                       </select>
                     </td>
                     <td className="p-2">{fmtInr(total)}</td>
-                    <td className="p-2"><button type="button" onClick={() => removeItem(idx)} className="text-red-600">✕</button></td>
+                    <td className="p-2">
+                      <button type="button" onClick={() => removeItem(idx)} className="text-red-600">
+                        ✕
+                      </button>
+                    </td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
         </div>
-        <button type="button" onClick={addItem} className="mt-2 px-3 py-1 bg-gray-200 rounded hover:bg-gray-300">+ Add Item</button>
+        <button type="button" onClick={addItem} className="mt-2 px-3 py-1 bg-gray-200 rounded hover:bg-gray-300">
+          + Add Item
+        </button>
       </div>
 
       {/* Totals */}
       <div className="border-t pt-4 space-y-2">
-        <div className="flex justify-between text-sm"><span>Sub Total:</span><span>{fmtInr(subTotal)}</span></div>
-        <div className="flex justify-between text-sm"><span>Total Tax:</span><span>{fmtInr(totalTax)}</span></div>
-        <div className="flex justify-between font-bold"><span>Grand Total:</span><span>{fmtInr(totalAmount)}</span></div
+        <div className="flex justify-between text-sm">
+          <span>Sub Total:</span>
+          <span>{fmtInr(subTotal)}</span>
+        </div>
+        <div className="flex justify-between text-sm">
+          <span>Total Tax:</span>
+          <span>{fmtInr(totalTax)}</span>
+        </div>
+        <div className="flex justify-between font-bold">
+          <span>Grand Total:</span>
+          <span>{fmtInr(totalAmount)}</span>
+        </div>
+      </div>
+
       {/* Actions */}
       <div className="flex justify-end gap-3 pt-4">
-        <button type="button" onClick={onCancel} className="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Cancel</button>
-        <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700">Save Invoice</button>
+        <button type="button" onClick={onCancel} className="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">
+          Cancel
+        </button>
+        <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700">
+          Save Invoice
+        </button>
       </div>
     </form>
   );
 };
 
 const CustomerForm = ({ onSave, onCancel, existingCustomer }) => {
-  const [c, setC] = useState(() =>
-    existingCustomer || { id: null, name: "", email: "", phone: "", address: "", gstin: "" }
-  );
+  const [c, setC] = useState(() => existingCustomer || { id: null, name: "", email: "", phone: "", address: "", gstin: "" });
 
   const submit = (e) => {
     e.preventDefault();
@@ -1168,8 +1323,12 @@ const CustomerForm = ({ onSave, onCancel, existingCustomer }) => {
       <Input label="Address" value={c.address} onChange={(e) => setC({ ...c, address: e.target.value })} />
       <Input label="GSTIN" value={c.gstin} onChange={(e) => setC({ ...c, gstin: e.target.value.toUpperCase() })} />
       <div className="flex justify-end gap-3">
-        <button type="button" onClick={onCancel} className="px-4 py-2 bg-gray-200 rounded">Cancel</button>
-        <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded">Save</button>
+        <button type="button" onClick={onCancel} className="px-4 py-2 bg-gray-200 rounded">
+          Cancel
+        </button>
+        <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded">
+          Save
+        </button>
       </div>
     </form>
   );
@@ -1202,6 +1361,7 @@ const cmp = (a, b, key, dir) => {
   const vb = b?.[key] ?? "";
   if (va < vb) return dir === "asc" ? -1 : 1;
   if (va > vb) return dir === "asc" ? 1 : -1;
+    if (va > vb) return dir === "asc" ? 1 : -1;
   return 0;
 };
 
@@ -1349,7 +1509,7 @@ function generatePrintableInvoice(inv) {
 </html>`;
 }
 
-/* small util for print escaping */
+/* escape for printing */
 function escapeHtml(s) {
   return String(s)
     .replace(/&/g, "&amp;")
@@ -1357,5 +1517,4 @@ function escapeHtml(s) {
     .replace(/>/g, "&gt;");
 }
 
-// DEBUG sentinel to confirm file parses fully
 console.log("✅ App.js loaded");
