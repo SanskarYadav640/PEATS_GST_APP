@@ -3,13 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 /* global XLSX */
 
 /**
- * PEATS — GST Invoice System
- * - Local persistence (invoices/customers)
- * - Excel import/export (SheetJS)
- * - Status: pending / paid-half / paid
- * - PO Number + PO Image (dataURL)
- * - Reports: received, remaining (paid-half handled), client summaries, Gmail reminders
- * - Printable A4 boxed invoice with stamp & signature area
+ * PEATS — GST Invoice System (final)
  */
 
 /* ------------------------------ Utils & Constants ------------------------------ */
@@ -18,18 +12,33 @@ const CURRENCY = new Intl.NumberFormat("en-IN", {
   currency: "INR",
   minimumFractionDigits: 2,
 });
-const fmtInr = (n = 0) => CURRENCY.format(Number.isFinite(n) ? n : Number.isFinite(+n) ? +n : 0);
+const fmtInr = (n = 0) => CURRENCY.format(Number.isFinite(n) ? n : 0);
 const safeNum = (v) => (Number.isFinite(v) ? v : Number.isFinite(+v) ? +v : 0);
 const idGen = () => (crypto?.randomUUID ? crypto.randomUUID() : Date.now().toString());
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 const sum = (arr, key) => arr.reduce((acc, it) => acc + safeNum(it[key] ?? 0), 0);
-const todayISO = () => new Date().toISOString().slice(0, 10);
+const todayISO = () => new Date().toISOString().split("T")[0];
 function addDaysISO(isoStr, days) {
   const base = isoStr ? new Date(isoStr) : new Date();
   if (Number.isNaN(+base)) return todayISO();
   base.setDate(base.getDate() + Number(days || 0));
-  return base.toISOString().slice(0, 10);
+  return base.toISOString().split("T")[0];
 }
+
+const GSTIN_REGEX = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/i;
+const GST_RATES = [2.5, 5, 8, 9, 18, 28];
+
+const calcItem = (item) => {
+  const qty = Math.max(0, safeNum(item.quantity));
+  const rate = Math.max(0, safeNum(item.rate));
+  const taxable = round2(qty * rate);
+  const cgstAmt = round2((taxable * Math.max(0, safeNum(item.cgst))) / 100);
+  const sgstAmt = round2((taxable * Math.max(0, safeNum(item.sgst))) / 100);
+  const igstAmt = round2((taxable * Math.max(0, safeNum(item.igst))) / 100);
+  const total = round2(taxable + cgstAmt + sgstAmt + igstAmt);
+  return { taxable, cgstAmt, sgstAmt, igstAmt, total };
+};
+
 function daysUntilDue(dueISO) {
   if (!dueISO) return null;
   const due = new Date(dueISO);
@@ -37,21 +46,25 @@ function daysUntilDue(dueISO) {
   const start = new Date(todayISO());
   start.setHours(0, 0, 0, 0);
   due.setHours(0, 0, 0, 0);
-  const diffMs = due - start;
+  const diffMs = due - start; // positive => remaining, negative => overdue
   return Math.round(diffMs / (1000 * 60 * 60 * 24));
 }
+
 function buildGmailLink({ to, subject, body }) {
   const base = "https://mail.google.com/mail/?view=cm&fs=1";
-  const params = new URLSearchParams({ to: to || "", su: subject || "", body: body || "" });
+  const params = new URLSearchParams({
+    to: to || "",
+    su: subject || "",
+    body: body || "",
+  });
   return `${base}&${params.toString()}`;
 }
+
 function formatReminderEmail(inv) {
   const days = daysUntilDue(inv.dueDate);
   const duePart = inv.dueDate
     ? ` (Due Date: ${inv.dueDate}${
-        typeof days === "number"
-          ? `, ${days < 0 ? `${Math.abs(days)} day(s) overdue` : `${days} day(s) remaining`}`
-          : ""
+        typeof days === "number" ? `, ${days < 0 ? `${Math.abs(days)} day(s) overdue` : `${days} day(s) remaining`}` : ""
       })`
     : "";
   const lines = [
@@ -66,10 +79,14 @@ function formatReminderEmail(inv) {
     "ParthaSarthi Engineering and Training Services (PEATS)",
     "parthasarthiconsultancy@gmail.com",
   ];
-  return { subject: `Payment Reminder — Invoice ${inv.invoiceNumber || ""}`, body: lines.join("\n") };
+  return {
+    subject: `Payment Reminder — Invoice ${inv.invoiceNumber || ""}`,
+    body: lines.join("\n"),
+  };
 }
-// Invoice number: PINV/YYYY/MM/DD980001 (per day; start 980001)
-function nextInvoiceNumberForDate(dateStr, existing = []) {
+
+// Invoice number generator — PINV/YYYY/MM/DD980001 (per day; start 980001)
+function nextInvoiceNumberForDate(dateStr, existingInvoices = []) {
   if (!dateStr) {
     const t = new Date();
     const yyyy = String(t.getFullYear());
@@ -81,7 +98,7 @@ function nextInvoiceNumberForDate(dateStr, existing = []) {
   const mm = dateStr.slice(5, 7);
   const dd = dateStr.slice(8, 10);
   const prefix = `PINV/${yyyy}/${mm}/${dd}`;
-  const seqs = existing
+  const seqs = existingInvoices
     .map((inv) => inv?.invoiceNumber)
     .filter((n) => typeof n === "string" && n.startsWith(prefix))
     .map((n) => {
@@ -93,27 +110,15 @@ function nextInvoiceNumberForDate(dateStr, existing = []) {
   const next = seqs.length ? Math.max(...seqs) + 1 : base;
   return `${prefix}${next}`;
 }
-const GSTIN_REGEX = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/i;
-// Requested GST drop-down percentages:
-const GST_RATES = [2.5, 5, 8, 9, 18, 28];
-
-const calcItem = (item) => {
-  const qty = Math.max(0, safeNum(item.quantity));
-  const rate = Math.max(0, safeNum(item.rate));
-  const taxable = round2(qty * rate);
-  const cgstAmt = round2((taxable * Math.max(0, safeNum(item.cgst))) / 100);
-  const sgstAmt = round2((taxable * Math.max(0, safeNum(item.sgst))) / 100);
-  const igstAmt = round2((taxable * Math.max(0, safeNum(item.igst))) / 100);
-  const total = round2(taxable + cgstAmt + sgstAmt + igstAmt);
-  return { taxable, cgstAmt, sgstAmt, igstAmt, total };
-};
 
 /* ------------------------------ Company Details ------------------------------ */
 const companyDetails = {
   name: "ParthaSarthi Engineering and Training Services (PEATS)",
-  phone: "7617001477", // removed 9889031719
+  // Removed 9889031719; kept only valid numbers
+  phone: "7617001477",
   email: "Parthasarthiconsultancy@gmail.com",
-  owners: "Mr. Ramkaran Yadav", // removed Mr. Ajay Shankar Amist
+  // Removed owner "Mr. Ajay Shankar Amist"
+  owners: "Mr. Ramkaran Yadav",
   address:
     "Tower 3, Goldfinch, Paarth Republic, Kanpur Road, Miranpur, Pinvat, Banthra, Sikandarpur, Post- Banthra Dist. - Lucknow, Pin- 226401",
 };
@@ -124,6 +129,7 @@ const Icon = ({ path, className = "w-5 h-5" }) => (
     <path strokeLinecap="round" strokeLinejoin="round" d={path} />
   </svg>
 );
+
 const ICONS = {
   dashboard: "M3 3h18M3 7h18M3 21h18M3 7v14m6-14v14m6-14v14m6-14v14",
   invoice: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z",
@@ -184,7 +190,7 @@ export default function App() {
     };
   }, []);
 
-  // Persist to localStorage
+  // Persist to localStorage (still supported)
   useEffect(() => saveLS(LS_KEYS.invoices, invoices), [invoices]);
   useEffect(() => saveLS(LS_KEYS.customers, customers), [customers]);
 
@@ -216,6 +222,7 @@ export default function App() {
     if (type === "customer") setCustomers((prev) => prev.filter((c) => c.id !== id));
   };
 
+  // Quick in-place invoice updater (for inline status change)
   const quickUpdateInvoice = (patched) => {
     setInvoices((prev) => prev.map((x) => (x.id === patched.id ? patched : x)));
   };
@@ -303,6 +310,7 @@ export default function App() {
     </div>
   );
 }
+
 /* ------------------------------ Layout ------------------------------ */
 const Sidebar = ({ currentView, setView }) => {
   const nav = [
@@ -367,21 +375,26 @@ const Header = ({ currentView, setView }) => {
     </div>
   );
 };
-
 /* ------------------------------ Dashboard ------------------------------ */
 const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxReady }) => {
   const fileRef = useRef(null);
 
   const totals = useMemo(() => {
-    const totalRevenue = sum(invoices, "totalAmount");
-    // outstanding should respect paid-half
+    // Treat "paid-half" as partially received
+    const received = invoices.reduce((acc, inv) => {
+      if (inv.status === "paid") return acc + safeNum(inv.totalAmount);
+      if (inv.status === "paid-half") return acc + Math.min(safeNum(inv.paidHalfAmount || 0), safeNum(inv.totalAmount));
+      return acc;
+    }, 0);
     const outstanding = invoices.reduce((acc, inv) => {
       if (inv.status === "paid") return acc;
-      const paid = inv.status === "paid-half" ? safeNum(inv.amountPaid || 0) : 0;
-      const rem = Math.max(0, safeNum(inv.totalAmount) - paid);
-      return acc + rem;
+      if (inv.status === "paid-half") {
+        const rem = Math.max(0, safeNum(inv.totalAmount) - safeNum(inv.paidHalfAmount || 0));
+        return acc + rem;
+      }
+      return acc + safeNum(inv.totalAmount);
     }, 0);
-    return { totalRevenue, outstanding };
+    return { totalRevenue: sum(invoices, "totalAmount"), received: round2(received), outstanding: round2(outstanding) };
   }, [invoices]);
 
   const importExcel = (e) => {
@@ -417,12 +430,12 @@ const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxRea
               customerGstin: row["Customer GSTIN"] ?? row["customer_gstin"] ?? "",
               customerEmail: row["Customer Email"] ?? row["customer_email"] ?? row["email"] ?? "",
               status: String(row["Invoice Status"] ?? row["status"] ?? "pending").toLowerCase(),
-              amountPaid: safeNum(row["Amount Paid"] ?? row["amount_paid"] ?? 0),
-              poNumber: row["PO Number"] ?? row["Against PO Number"] ?? row["po_number"] ?? "",
+              paidHalfAmount: safeNum(row["Paid Half Amount"] ?? 0),
+              poNumber: row["PO Number"] ?? row["po_number"] ?? "",
               poImage: row["PO Image"] ?? row["po_image"] ?? "",
-              poBaseValue: safeNum(row["PO Base Value"] ?? row["po_base_value"] ?? 0),
-              poGstMode: row["PO GST Mode"] ?? row["po_gst_mode"] ?? "cgst_sgst",
-              poGstRate: safeNum(row["PO GST %"] ?? row["po_gst_rate"] ?? 18),
+              poBaseValue: safeNum(row["PO Base Value"] ?? 0),
+              poGstMode: row["PO GST Mode"] ?? "cgst_sgst",
+              poGstRate: safeNum(row["PO GST %"] ?? 18),
               totalAmount: safeNum(row["Invoice Total"] ?? row["invoice_total"] ?? 0),
               items: [],
             };
@@ -489,7 +502,7 @@ const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxRea
           <input type="file" ref={fileRef} onChange={importExcel} className="hidden" accept=".xlsx,.xls" />
           <ExportExcelButton invoices={invoices} disabled={!xlsxReady} />
           <ExportJsonButton invoices={invoices} customers={customers} />
-          {/* Clear data button removed by request */}
+          {/* ClearDataButton removed as requested */}
         </div>
       </div>
 
@@ -530,18 +543,19 @@ const ExportExcelButton = ({ invoices, disabled }) => {
           "Customer GSTIN": invoice.customerGstin,
           "Customer Email": invoice.customerEmail || "",
           "Invoice Status": invoice.status,
-          "Amount Paid": round2(safeNum(invoice.amountPaid || 0)),
-          "Against PO Number": invoice.poNumber || "",
+          "Paid Half Amount": safeNum(invoice.paidHalfAmount || 0),
+          "PO Number": invoice.poNumber || "",
           "PO Image": invoice.poImage || "",
-          "PO Base Value": round2(safeNum(invoice.poBaseValue || 0)),
+          "PO Base Value": safeNum(invoice.poBaseValue || 0),
           "PO GST Mode": invoice.poGstMode || "cgst_sgst",
-          "PO GST %": safeNum(invoice.poGstRate ?? 18),
+          "PO GST %": safeNum(invoice.poGstRate || 0),
           "Item Description": item.description,
           "HSN/SAC": item.hsn,
           Quantity: item.quantity,
           Rate: item.rate,
           "GST Mode": item.gstMode || (safeNum(item.igst) > 0 ? "igst" : "cgst_sgst"),
-          "GST %": item.gstRate ?? (safeNum(item.igst) > 0 ? safeNum(item.igst) : safeNum(item.cgst) + safeNum(item.sgst)),
+          "GST %":
+            item.gstRate ?? (safeNum(item.igst) > 0 ? safeNum(item.igst) : safeNum(item.cgst) + safeNum(item.sgst)),
           "Taxable Value": taxable,
           "CGST Rate (%)": item.cgst,
           "CGST Amount": cgstAmt,
@@ -603,7 +617,10 @@ const ExportJsonButton = ({ invoices, customers }) => {
     }, 0);
   };
   return (
-    <button onClick={onClick} className="inline-flex items-center px-4 py-2 rounded-lg shadow bg-gray-800 text-white hover:bg-black">
+    <button
+      onClick={onClick}
+      className="inline-flex items-center px-4 py-2 rounded-lg shadow bg-gray-800 text-white hover:bg-black"
+    >
       <Icon path={ICONS.download} className="w-5 h-5 mr-2" /> Backup JSON
     </button>
   );
@@ -656,8 +673,8 @@ const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate, onQuickUpdat
     }
   };
 
-  const th = (label, key) => (
-    <th className="p-3 cursor-pointer select-none whitespace-nowrap" onClick={() => toggleSort(key)} title="Sort">
+  const th = (label, key, width) => (
+    <th className={`p-3 ${width ?? ""} cursor-pointer select-none whitespace-nowrap`} onClick={() => toggleSort(key)} title="Sort">
       <div className="inline-flex items-center gap-1">
         {label}
         <span className="text-xs text-gray-400">{sortKey === key ? (sortDir === "asc" ? "▲" : "▼") : ""}</span>
@@ -771,9 +788,14 @@ const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate, onQuickUpdat
     </div>
   );
 };
+/* ------------------------------ Pagination & IconBtn ------------------------------ */
 const Pagination = ({ page, totalPages, onPageChange }) => (
   <div className="flex items-center justify-end gap-2 mt-4">
-    <button onClick={() => onPageChange(Math.max(1, page - 1))} className="px-3 py-1 border rounded-lg disabled:opacity-50" disabled={page === 1}>
+    <button
+      onClick={() => onPageChange(Math.max(1, page - 1))}
+      className="px-3 py-1 border rounded-lg disabled:opacity-50"
+      disabled={page === 1}
+    >
       Prev
     </button>
     <span className="text-sm text-gray-600">
@@ -859,22 +881,23 @@ const CustomerListView = ({ customers, onEdit, onDelete }) => {
   );
 };
 
-/* ------------------------------ Reports (paid-half aware) ------------------------------ */
+/* ------------------------------ Reports ------------------------------ */
 const ReportsView = ({ invoices, customers, xlsxReady }) => {
+  // Totals: received includes paid-half amount; remaining counts only due part
   const totals = useMemo(() => {
-    const received = invoices.reduce((s, i) => {
-      if (i.status === "paid") return s + safeNum(i.totalAmount);
-      if (i.status === "paid-half") return s + Math.min(safeNum(i.totalAmount), safeNum(i.amountPaid || 0));
-      return s;
-    }, 0);
-
-    const remaining = invoices.reduce((s, i) => {
-      if (i.status === "paid") return s;
-      const paid = i.status === "paid-half" ? safeNum(i.amountPaid || 0) : 0;
-      const rem = Math.max(0, safeNum(i.totalAmount) - paid);
-      return s + rem;
-    }, 0);
-
+    let received = 0, remaining = 0;
+    invoices.forEach((i) => {
+      const total = safeNum(i.totalAmount);
+      if (i.status === "paid") {
+        received += total;
+      } else if (i.status === "paid-half") {
+        const paid = Math.min(safeNum(i.paidHalfAmount || 0), total);
+        received += paid;
+        remaining += Math.max(0, total - paid);
+      } else {
+        remaining += total;
+      }
+    });
     return { received: round2(received), remaining: round2(remaining) };
   }, [invoices]);
 
@@ -888,44 +911,45 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
           const c = customers.find((x) => x.id === i.customerId);
           email = c?.email || "";
         }
-        const paid = i.status === "paid-half" ? safeNum(i.amountPaid || 0) : 0;
-        const remaining = round2(Math.max(0, safeNum(i.totalAmount) - paid));
+        let dueAmount = safeNum(i.totalAmount);
+        if (i.status === "paid-half") {
+          const paid = safeNum(i.paidHalfAmount || 0);
+          dueAmount = Math.max(0, dueAmount - paid);
+        }
         return {
           id: i.id,
           invoiceNumber: i.invoiceNumber,
           customerName: i.customerName,
           customerEmail: email,
           dueDate: i.dueDate || "—",
-          amountRemaining: remaining,
-          amountPaid: round2(paid),
+          amount: round2(dueAmount),
           days: d,
-          status: i.status,
         };
       })
-      .filter((r) => r.amountRemaining > 0)
       .sort((a, b) => {
-        const da = a.days ?? 9999;
-        const db = b.days ?? 9999;
+        const da = a.days ?? 9999, db = b.days ?? 9999;
         return da - db;
       });
   }, [invoices, customers]);
 
+  // Client summary (pending totals per customer)
   const clientSummary = useMemo(() => {
     const map = new Map();
     invoices.forEach((i) => {
+      let due = safeNum(i.totalAmount);
       if (i.status === "paid") return;
-      const paid = i.status === "paid-half" ? safeNum(i.amountPaid || 0) : 0;
-      const remaining = Math.max(0, safeNum(i.totalAmount) - paid);
-      if (remaining <= 0) return;
-
+      if (i.status === "paid-half") {
+        const paid = safeNum(i.paidHalfAmount || 0);
+        due = Math.max(0, due - paid);
+      }
       const key = i.customerId || i.customerName || "—";
       const email = i.customerEmail || customers.find((c) => c.id === i.customerId)?.email || "";
-      const prev = map.get(key) || { customerName: i.customerName || "—", email, totalRemaining: 0, invoices: [] };
-      prev.totalRemaining += remaining;
+      const prev = map.get(key) || { customerName: i.customerName || "—", email, totalPending: 0, invoices: [] };
+      prev.totalPending += due;
       prev.invoices.push(i);
       map.set(key, prev);
     });
-    return Array.from(map.values()).sort((a, b) => b.totalRemaining - a.totalRemaining);
+    return Array.from(map.values()).sort((a, b) => b.totalPending - a.totalPending);
   }, [invoices, customers]);
 
   function summaryEmailPayload(entry) {
@@ -936,18 +960,19 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
       "",
       ...entry.invoices.map((inv) => {
         const days = daysUntilDue(inv.dueDate);
+        const total = safeNum(inv.totalAmount);
+        const paid = inv.status === "paid-half" ? safeNum(inv.paidHalfAmount || 0) : 0;
+        const dueAmt = Math.max(0, total - paid);
         const aging =
           typeof days === "number"
             ? days < 0
               ? `${Math.abs(days)} day(s) overdue`
               : `${days} day(s) remaining`
             : "No due date";
-        const paid = inv.status === "paid-half" ? safeNum(inv.amountPaid || 0) : 0;
-        const remaining = Math.max(0, safeNum(inv.totalAmount) - paid);
-        return `• ${inv.invoiceNumber} — Remaining: ${fmtInr(remaining)} — Due: ${inv.dueDate || "—"} (${aging})`;
+        return `• ${inv.invoiceNumber} — Due: ${fmtInr(dueAmt)} — Due Date: ${inv.dueDate || "—"} (${aging})`;
       }),
       "",
-      `Total pending: ${fmtInr(round2(entry.totalRemaining))}`,
+      `Total pending: ${fmtInr(entry.totalPending)}`,
       "",
       "Kindly arrange the payment at your earliest convenience.",
       "",
@@ -970,7 +995,6 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
         <StatCard title="Amount Remaining" value={fmtInr(totals.remaining)} />
       </div>
 
-      {/* Client summary */}
       <div>
         <h3 className="font-semibold mb-2">Client Summary (Pending)</h3>
         <div className="overflow-x-auto">
@@ -991,9 +1015,14 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
                   <tr key={idx} className="border-b hover:bg-gray-50">
                     <td className="p-3">{entry.customerName}</td>
                     <td className="p-3">{entry.email || "—"}</td>
-                    <td className="p-3">{fmtInr(round2(entry.totalRemaining))}</td>
+                    <td className="p-3">{fmtInr(entry.totalPending)}</td>
                     <td className="p-3">
-                      <a href={link} target="_blank" rel="noreferrer" className="px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700">
+                      <a
+                        href={link}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700"
+                      >
                         Send Summary
                       </a>
                     </td>
@@ -1010,7 +1039,7 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
         </div>
       </div>
 
-      {/* Pending invoices with per-invoice remaining */}
+      {/* Pending invoices (aging & one-click reminders) */}
       <div>
         <h3 className="font-semibold mb-2">Pending Invoices (Aging & Reminders)</h3>
         <div className="overflow-x-auto">
@@ -1022,17 +1051,22 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
                 <th className="p-3">Email</th>
                 <th className="p-3">Due Date</th>
                 <th className="p-3">Days</th>
-                <th className="p-3">Remaining</th>
+                <th className="p-3">Amount Due</th>
                 <th className="p-3">Reminder</th>
               </tr>
             </thead>
             <tbody>
               {pendingRows.map((r) => {
+                const inv = invoices.find((i) => i.id === r.id);
+                const total = safeNum(inv?.totalAmount || 0);
+                const paid = inv?.status === "paid-half" ? safeNum(inv?.paidHalfAmount || 0) : 0;
+                const dueAmt = Math.max(0, total - paid);
+
                 const { subject, body } = formatReminderEmail({
                   invoiceNumber: r.invoiceNumber,
                   dueDate: r.dueDate === "—" ? "" : r.dueDate,
                   customerName: r.customerName,
-                  totalAmount: r.amountRemaining,
+                  totalAmount: dueAmt,
                 });
                 const link = buildGmailLink({ to: r.customerEmail || "", subject, body });
 
@@ -1053,19 +1087,19 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
 
                 return (
                   <tr key={r.id} className="border-b hover:bg-gray-50">
-                    <td className="p-3 font-medium">
-                      {r.invoiceNumber}
-                      {r.status === "paid-half" && (
-                        <span className="ml-2 text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">Paid-Half</span>
-                      )}
-                    </td>
+                    <td className="p-3 font-medium">{r.invoiceNumber}</td>
                     <td className="p-3">{r.customerName}</td>
                     <td className="p-3">{r.customerEmail || "—"}</td>
                     <td className="p-3">{r.dueDate}</td>
                     <td className="p-3">{badge}</td>
-                    <td className="p-3">{fmtInr(r.amountRemaining)}</td>
+                    <td className="p-3">{fmtInr(dueAmt)}</td>
                     <td className="p-3">
-                      <a href={link} target="_blank" rel="noreferrer" className="px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700">
+                      <a
+                        href={link}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700"
+                      >
                         Send Reminder
                       </a>
                     </td>
@@ -1089,11 +1123,11 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
 
 /* ------------------------------ Forms ------------------------------ */
 const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice }) => {
-  const [touchedNumber] = useState(false); // number is read-only now
+  const [touchedNumber] = useState(false); // number is locked now
   const [invoice, setInvoice] = useState(() => {
     const initDate = existingInvoice?.invoiceDate || todayISO();
     const defaultNumber = existingInvoice?.invoiceNumber || nextInvoiceNumberForDate(initDate, allInvoices);
-    const initialDue = existingInvoice?.dueDate || addDaysISO(initDate, 45);
+    const initialDue = existingInvoice?.dueDate || addDaysISO(initDate, 45); // +45 days
     return {
       id: existingInvoice?.id || null,
       invoiceNumber: defaultNumber,
@@ -1104,6 +1138,7 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
       customerAddress: existingInvoice?.customerAddress || "",
       customerGstin: existingInvoice?.customerGstin || "",
       customerEmail: existingInvoice?.customerEmail || "",
+      /* PO fields */
       poNumber: existingInvoice?.poNumber || "",
       poImage: existingInvoice?.poImage || "",
       poBaseValue: safeNum(existingInvoice?.poBaseValue || 0),
@@ -1112,17 +1147,29 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
       items: existingInvoice?.items?.length
         ? existingInvoice.items
         : [
-            { description: "", hsn: "", quantity: 1, rate: 0, cgst: 0, sgst: 0, igst: 0, gstMode: "cgst_sgst", gstRate: 18, total: 0 },
+            {
+              description: "",
+              hsn: "",
+              quantity: 1,
+              rate: 0,
+              cgst: 0,
+              sgst: 0,
+              igst: 0,
+              gstMode: "cgst_sgst",
+              gstRate: 18,
+              total: 0,
+            },
           ],
       status: existingInvoice?.status || "pending",
-      amountPaid: safeNum(existingInvoice?.amountPaid || 0),
+      paidHalfAmount: safeNum(existingInvoice?.paidHalfAmount || 0),
     };
   });
 
+  // Auto-set number & due date for new invoices when date changes (number is readOnly anyway)
   useEffect(() => {
     if (existingInvoice?.id) return;
-    if (touchedNumber) return;
-    setInvoice((prev) => ({ ...prev, dueDate: addDaysISO(prev.invoiceDate, 45) }));
+    const next = nextInvoiceNumberForDate(invoice.invoiceDate, allInvoices);
+    setInvoice((prev) => ({ ...prev, invoiceNumber: next, dueDate: addDaysISO(invoice.invoiceDate, 45) }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [invoice.invoiceDate, allInvoices]);
 
@@ -1131,7 +1178,6 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
     sum(invoice.items.map(calcItem), "cgstAmt") + sum(invoice.items.map(calcItem), "sgstAmt") + sum(invoice.items.map(calcItem), "igstAmt")
   );
   const totalAmount = round2(subTotal + totalTax);
-  const remainingAmount = round2(Math.max(0, totalAmount - safeNum(invoice.amountPaid)));
 
   const onSelectCustomer = (e) => {
     const c = customers.find((x) => x.id === e.target.value);
@@ -1204,50 +1250,35 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
 
   const removeItem = (idx) => setInvoice((prev) => ({ ...prev, items: prev.items.filter((_, i) => i !== idx) }));
 
-  function validateBeforeSave() {
-    if (!invoice.invoiceDate || !invoice.dueDate) {
-      alert("Please select Invoice Date and Due Date.");
-      return false;
-    }
-    if (!invoice.customerName?.trim()) {
-      alert("Customer name is required.");
-      return false;
-    }
-    if (!invoice.customerAddress?.trim()) {
-      alert("Customer address is required.");
-      return false;
-    }
-    if (!invoice.customerEmail?.trim()) {
-      alert("Customer email is required.");
-      return false;
-    }
-    const hasValidItem = invoice.items.some(
-      (it) => it.description?.trim() && safeNum(it.quantity) > 0 && safeNum(it.rate) > 0
-    );
-    if (!hasValidItem) {
-      alert("Add at least one item with description, quantity > 0, and rate > 0.");
-      return false;
-    }
-    if (invoice.status === "paid-half") {
-      if (!(safeNum(invoice.amountPaid) > 0)) {
-        alert("Please enter the Amount Paid for Paid-Half invoices.");
-        return false;
-      }
-      if (safeNum(invoice.amountPaid) >= totalAmount) {
-        alert("Amount Paid must be less than the Grand Total for Paid-Half.");
-        return false;
-      }
-    }
-    if (invoice.customerGstin && !GSTIN_REGEX.test(invoice.customerGstin)) {
-      if (!window.confirm("Customer GSTIN does not look valid. Save anyway?")) return false;
-    }
-    return true;
-  }
+  // Validation
+  const requiredOk =
+    !!invoice.invoiceNumber &&
+    !!invoice.invoiceDate &&
+    !!invoice.dueDate &&
+    !!invoice.customerName &&
+    !!invoice.customerAddress &&
+    !!invoice.customerGstin && // GSTIN required
+    GSTIN_REGEX.test(invoice.customerGstin) && // must match format
+    invoice.items.length > 0 &&
+    invoice.items.every((it) => it.description && safeNum(it.quantity) > 0);
 
   const submit = (e) => {
     e.preventDefault();
-    if (!validateBeforeSave()) return;
-    onSave({ ...invoice, totalAmount, amountPaid: safeNum(invoice.amountPaid) });
+    if (!requiredOk) {
+      alert("Please fill all required fields, valid GSTIN, and at least one item.");
+      return;
+    }
+    if (invoice.status === "paid-half") {
+      if (!(safeNum(invoice.paidHalfAmount) > 0)) {
+        alert("Please enter the amount paid for Paid-Half status.");
+        return;
+      }
+      if (safeNum(invoice.paidHalfAmount) > totalAmount) {
+        alert("Paid amount cannot exceed the grand total.");
+        return;
+      }
+    }
+    onSave({ ...invoice, totalAmount });
   };
 
   const poGrossValue = round2(safeNum(invoice.poBaseValue || 0) * (1 + safeNum(invoice.poGstRate || 0) / 100));
@@ -1255,6 +1286,8 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
     rate = safeNum(rate);
     return mode === "igst" ? `IGST ${rate}%` : `CGST ${(rate / 2).toFixed(2)}% + SGST ${(rate / 2).toFixed(2)}%`;
   };
+
+  const remainingIfHalf = Math.max(0, totalAmount - safeNum(invoice.paidHalfAmount || 0));
 
   return (
     <form onSubmit={submit} className="bg-white p-6 rounded-xl shadow space-y-6">
@@ -1264,13 +1297,9 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
           <input
             value={invoice.invoiceNumber}
             readOnly
-            className="p-2 border rounded-lg w-full bg-gray-100 cursor-not-allowed"
-            title="Auto-generated and locked"
-            required
+            className="p-2 border rounded-lg w-full bg-gray-50 cursor-not-allowed"
           />
-          <p className="text-xs text-gray-500 mt-1">
-            Format: <code>PINV/YYYY/MM/DD980001</code>
-          </p>
+          <p className="text-xs text-gray-500 mt-1">Auto-generated. Locked.</p>
         </div>
         <Input
           label="Invoice Date"
@@ -1279,7 +1308,13 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
           onChange={(e) => setInvoice({ ...invoice, invoiceDate: e.target.value, dueDate: addDaysISO(e.target.value, 45) })}
           required
         />
-        <Input label="Due Date" type="date" value={invoice.dueDate} onChange={(e) => setInvoice({ ...invoice, dueDate: e.target.value })} required />
+        <Input
+          label="Due Date (+45 days auto)"
+          type="date"
+          value={invoice.dueDate}
+          onChange={(e) => setInvoice({ ...invoice, dueDate: e.target.value })}
+          required
+        />
       </div>
 
       <div className="border-t pt-4">
@@ -1298,8 +1333,9 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
           </div>
           <Input label="Customer Name" value={invoice.customerName} onChange={(e) => setInvoice({ ...invoice, customerName: e.target.value })} required />
           <Input label="Customer Address" value={invoice.customerAddress} onChange={(e) => setInvoice({ ...invoice, customerAddress: e.target.value })} required />
-          <Input label="Customer GSTIN" value={invoice.customerGstin} onChange={(e) => setInvoice({ ...invoice, customerGstin: e.target.value })} />
-          <Input label="Customer Email" value={invoice.customerEmail} onChange={(e) => setInvoice({ ...invoice, customerEmail: e.target.value })} required />
+          {/* Keep default casing of GSTIN (no forced uppercase) */}
+          <Input label="Customer GSTIN" value={invoice.customerGstin} onChange={(e) => setInvoice({ ...invoice, customerGstin: e.target.value })} required />
+          <Input label="Customer Email" value={invoice.customerEmail} onChange={(e) => setInvoice({ ...invoice, customerEmail: e.target.value })} />
         </div>
       </div>
 
@@ -1317,20 +1353,15 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
                 const f = e.target.files?.[0];
                 if (!f) return;
                 const reader = new FileReader();
-                reader.onload = (ev) => setInvoice((prev) => ({ ...prev, poImage: String(ev.target.result) }));
+                reader.onload = (ev) => setInvoice((prev) => ({ ...prev, poImage: String(ev.target.result) })); // dataURL
                 reader.readAsDataURL(f);
               }}
               className="p-2 border rounded-lg w-full bg-white"
             />
             {invoice.poImage && (
-              <div className="mt-2 space-y-1">
-                <img src={invoice.poImage} alt="PO" className="max-h-32 rounded border" />
-                <div>
-                  <a href={invoice.poImage} target="_blank" rel="noreferrer" className="text-indigo-600 text-sm inline-block underline">
-                    View full size
-                  </a>
-                </div>
-              </div>
+              <a href={invoice.poImage} target="_blank" rel="noreferrer" className="text-indigo-600 text-sm mt-1 inline-block">
+                Preview PO Image
+              </a>
             )}
           </div>
           <div>
@@ -1346,6 +1377,22 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
             </select>
           </div>
         </div>
+
+        {/* Paid-Half extra input */}
+        {invoice.status === "paid-half" && (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
+            <Input
+              label="Amount Paid (Required)"
+              type="number"
+              value={invoice.paidHalfAmount}
+              onChange={(e) => setInvoice({ ...invoice, paidHalfAmount: safeNum(e.target.value) })}
+            />
+            <div>
+              <label className="mb-1 block text-sm text-gray-600">Remaining Amount</label>
+              <input value={round2(remainingIfHalf)} readOnly className="p-2 border rounded-lg w-full bg-gray-50" />
+            </div>
+          </div>
+        )}
 
         {/* PO Value + GST */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4">
@@ -1455,29 +1502,6 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
         </button>
       </div>
 
-      {/* Paid-Half capture */}
-      {invoice.status === "paid-half" && (
-        <div className="border-t pt-4">
-          <h3 className="text-lg font-semibold mb-3">Payment (Half)</h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
-            <Input
-              label="Amount Paid"
-              type="number"
-              value={invoice.amountPaid}
-              onChange={(e) => setInvoice({ ...invoice, amountPaid: safeNum(e.target.value) })}
-              required
-            />
-            <div>
-              <label className="mb-1 block text-sm text-gray-600">Remaining (Auto)</label>
-              <input readOnly value={remainingAmount} className="p-2 border rounded-lg w-full bg-gray-50" />
-            </div>
-            <div className="text-sm text-gray-500">
-              Grand Total: <strong>{fmtInr(totalAmount)}</strong>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Totals */}
       <div className="border-t pt-4 space-y-2">
         <div className="flex justify-between text-sm">
@@ -1499,7 +1523,11 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
         <button type="button" onClick={onCancel} className="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">
           Cancel
         </button>
-        <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700">
+        <button
+          type="submit"
+          className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700"
+          disabled={!requiredOk || (invoice.status === "paid-half" && !(safeNum(invoice.paidHalfAmount) > 0))}
+        >
           Save Invoice
         </button>
       </div>
@@ -1508,9 +1536,7 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
 };
 
 const CustomerForm = ({ onSave, onCancel, existingCustomer }) => {
-  const [c, setC] = useState(() =>
-    existingCustomer || { id: null, name: "", email: "", phone: "", address: "", gstin: "" }
-  );
+  const [c, setC] = useState(() => existingCustomer || { id: null, name: "", email: "", phone: "", address: "", gstin: "" });
 
   const submit = (e) => {
     e.preventDefault();
@@ -1539,6 +1565,7 @@ const CustomerForm = ({ onSave, onCancel, existingCustomer }) => {
     </form>
   );
 };
+
 /* ------------------------------ Shared Helpers ------------------------------ */
 const Input = ({ label, ...props }) => (
   <div>
@@ -1569,25 +1596,22 @@ const cmp = (a, b, key, dir) => {
   return 0;
 };
 
-/* ------------------------------ Printable Invoice (A4 boxed, portrait) ------------------------------ */
+/* ------------------------------ Printable Invoice (A4 boxed) ------------------------------ */
 function generatePrintableInvoice(inv) {
   const itemsHtml = (inv.items || [])
     .map((it, idx) => {
       const { taxable, cgstAmt, sgstAmt, igstAmt, total } = calcItem(it);
-      const splitText =
-        safeNum(it.igst) > 0
-          ? `IGST ${safeNum(it.igst).toFixed(2)}%`
-          : `CGST ${safeNum(it.cgst).toFixed(2)}% + SGST ${safeNum(it.sgst).toFixed(2)}%`;
-
+      const split =
+        it.gstMode === "igst"
+          ? `IGST ${safeNum(it.gstRate)}%`
+          : `CGST ${(safeNum(it.gstRate) / 2).toFixed(2)}% + SGST ${(safeNum(it.gstRate) / 2).toFixed(2)}%`;
       return `<tr>
         <td style="text-align:center">${idx + 1}</td>
-        <td>
-          ${escapeHtml(it.description || "")}
-          <div style="color:#666;font-size:10px;margin-top:2px">${escapeHtml(splitText)}</div>
-        </td>
+        <td>${escapeHtml(it.description || "")}</td>
         <td style="text-align:center">${escapeHtml(it.hsn || "")}</td>
         <td style="text-align:right">${safeNum(it.quantity).toFixed(2)}</td>
         <td style="text-align:right">${safeNum(it.rate).toFixed(2)}</td>
+        <td style="text-align:center">${escapeHtml(split)}</td>
         <td style="text-align:right">${taxable.toFixed(2)}</td>
         <td style="text-align:right">${cgstAmt.toFixed(2)}</td>
         <td style="text-align:right">${sgstAmt.toFixed(2)}</td>
@@ -1597,10 +1621,10 @@ function generatePrintableInvoice(inv) {
     })
     .join("");
 
-  const subTotal   = round2(sum(inv.items.map(calcItem), "taxable"));
-  const totalCgst  = round2(sum(inv.items.map(calcItem), "cgstAmt"));
-  const totalSgst  = round2(sum(inv.items.map(calcItem), "sgstAmt"));
-  const totalIgst  = round2(sum(inv.items.map(calcItem), "igstAmt"));
+  const subTotal = round2(sum(inv.items.map(calcItem), "taxable"));
+  const totalCgst = round2(sum(inv.items.map(calcItem), "cgstAmt"));
+  const totalSgst = round2(sum(inv.items.map(calcItem), "sgstAmt"));
+  const totalIgst = round2(sum(inv.items.map(calcItem), "igstAmt"));
   const grandTotal = round2(safeNum(inv.totalAmount));
 
   const dueInfo = inv.dueDate ? `Due Date: ${inv.dueDate}` : "";
@@ -1618,7 +1642,11 @@ function generatePrintableInvoice(inv) {
   <style>
     @page { size: A4; margin: 14mm; }
     body { font-family: Arial, sans-serif; color:#222; }
-    .sheet { border: 2px solid #111; border-radius: 6px; padding: 14px 16px; }
+    .sheet {
+      border: 2px solid #111;
+      border-radius: 6px;
+      padding: 14px 16px;
+    }
     .row { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
     .muted { color:#666; }
     h1 { font-size:18px; margin:0; }
@@ -1630,7 +1658,9 @@ function generatePrintableInvoice(inv) {
     .totals td { border:none; padding:3px 0; font-size:12px; }
     .totals .label { text-align:right; padding-right:8px; }
     .totals .value { text-align:right; width:120px; font-weight:600; }
-    .footer { margin-top:18px; text-align:center; font-size:11px; color:#666; }
+    .footer { margin-top:18px; font-size:11px; color:#666; }
+    .signbox { border:1px dashed #555; height:90px; display:flex; align-items:center; justify-content:center; }
+    .stampbox { border:1px dashed #555; height:90px; display:flex; align-items:center; justify-content:center; }
   </style>
 </head>
 <body>
@@ -1667,11 +1697,12 @@ function generatePrintableInvoice(inv) {
     <table>
       <thead>
         <tr>
-          <th style="width:42px">#</th>
+          <th style="width:36px">#</th>
           <th>Description</th>
           <th style="width:90px">HSN/SAC</th>
           <th style="width:70px">Qty</th>
           <th style="width:90px">Rate</th>
+          <th style="width:140px">GST Split</th>
           <th style="width:100px">Taxable</th>
           <th style="width:85px">CGST</th>
           <th style="width:85px">SGST</th>
@@ -1680,36 +1711,47 @@ function generatePrintableInvoice(inv) {
         </tr>
       </thead>
       <tbody>
-        ${itemsHtml || `<tr><td colspan="10" style="text-align:center">No items</td></tr>`}
+        ${itemsHtml || `<tr><td colspan="11" style="text-align:center">No items</td></tr>`}
       </tbody>
     </table>
 
     <table style="margin-top:10px; border:none">
       <tbody class="totals">
-        <tr><td class="label">Sub Total:</td><td class="value">${subTotal.toFixed(2)}</td></tr>
-        <tr><td class="label">CGST Total:</td><td class="value">${totalCgst.toFixed(2)}</td></tr>
-        <tr><td class="label">SGST Total:</td><td class="value">${totalSgst.toFixed(2)}</td></tr>
-        <tr><td class="label">IGST Total:</td><td class="value">${totalIgst.toFixed(2)}</td></tr>
-        <tr><td class="label" style="font-size:13px"><strong>Grand Total:</strong></td>
-            <td class="value" style="font-size:13px"><strong>${grandTotal.toFixed(2)}</strong></td></tr>
+        <tr>
+          <td class="label">Sub Total:</td>
+          <td class="value">${subTotal.toFixed(2)}</td>
+        </tr>
+        <tr>
+          <td class="label">CGST Total:</td>
+          <td class="value">${totalCgst.toFixed(2)}</td>
+        </tr>
+        <tr>
+          <td class="label">SGST Total:</td>
+          <td class="value">${totalSgst.toFixed(2)}</td>
+        </tr>
+        <tr>
+          <td class="label">IGST Total:</td>
+          <td class="value">${totalIgst.toFixed(2)}</td>
+        </tr>
+        <tr>
+          <td class="label" style="font-size:13px"><strong>Grand Total:</strong></td>
+          <td class="value" style="font-size:13px"><strong>${grandTotal.toFixed(2)}</strong></td>
+        </tr>
       </tbody>
     </table>
 
-    <!-- Stamp & Signature row -->
-    <div class="row" style="margin-top:14px; gap:20px">
+    <div class="row" style="gap:14px; margin-top:16px">
       <div style="flex:1">
-        <div style="border:1px dashed #888; height:90px; border-radius:4px; display:flex; align-items:center; justify-content:center; color:#666;">
-          Company Stamp
-        </div>
+        <div class="stampbox">Stamp</div>
       </div>
-      <div style="flex:1; text-align:right">
-        <div style="margin-top:56px; border-top:1px solid #333; display:inline-block; padding-top:6px;">
-          Authorized Signature
-        </div>
+      <div style="flex:1">
+        <div class="signbox">Authorized Signatory</div>
       </div>
     </div>
 
-    <div class="footer">This is a computer-generated invoice. No signature required.</div>
+    <div class="footer">
+      This is a computer-generated invoice. No signature required.
+    </div>
   </div>
 </body>
 </html>`;
