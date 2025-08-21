@@ -4,15 +4,42 @@ import React, { useState, useEffect, useRef } from 'react';
 
 // --- Main App Component ---
 export default function App() {
-    // All data is now stored in the browser's memory (React state).
-    // It will reset every time you close or refresh the page.
+    // --- State Initialization ---
+    const [invoices, setInvoices] = useState(() => {
+        try {
+            const savedInvoices = localStorage.getItem('peats-invoices');
+            return savedInvoices ? JSON.parse(savedInvoices) : [];
+        } catch (error) {
+            console.error("Error parsing invoices from localStorage", error);
+            return [];
+        }
+    });
+
+    const [customers, setCustomers] = useState(() => {
+        try {
+            const savedCustomers = localStorage.getItem('peats-customers');
+            return savedCustomers ? JSON.parse(savedCustomers) : [];
+        } catch (error) {
+            console.error("Error parsing customers from localStorage", error);
+            return [];
+        }
+    });
+
     const [currentView, setCurrentView] = useState('dashboard');
-    const [invoices, setInvoices] = useState([]);
-    const [customers, setCustomers] = useState([]);
     const [editingInvoice, setEditingInvoice] = useState(null);
     const [editingCustomer, setEditingCustomer] = useState(null);
 
-    // --- Dynamically load xlsx library for Excel import/export ---
+    // --- Effect to save data to localStorage whenever it changes ---
+    useEffect(() => {
+        try {
+            localStorage.setItem('peats-invoices', JSON.stringify(invoices));
+            localStorage.setItem('peats-customers', JSON.stringify(customers));
+        } catch (error) {
+            console.error("Error saving data to localStorage", error);
+        }
+    }, [invoices, customers]);
+
+    // --- Dynamically load xlsx library ---
     useEffect(() => {
         const script = document.createElement('script');
         script.src = 'https://cdn.sheetjs.com/xlsx-0.20.1/package/xlsx.full.min.js';
@@ -43,7 +70,7 @@ export default function App() {
         setCurrentView('customerForm');
     };
     
-    // --- Data Management Functions (replaces Firebase) ---
+    // --- Data Management Functions ---
     const saveData = (type, data) => {
         const id = data.id || Date.now().toString();
         const finalData = { ...data, id };
@@ -75,21 +102,33 @@ export default function App() {
         }
     };
 
+    const getNextInvoiceNumber = () => {
+        const lastInvoice = invoices
+            .filter(inv => inv.invoiceNumber.startsWith('PINV980'))
+            .map(inv => parseInt(inv.invoiceNumber.replace('PINV980', ''), 10))
+            .sort((a, b) => a - b)
+            .pop();
+
+        const lastNum = lastInvoice || 0;
+        return `PINV980${(lastNum + 1).toString().padStart(3, '0')}`;
+    };
+
     const renderView = () => {
         switch (currentView) {
             case 'dashboard':
-                return <DashboardView invoices={invoices} customers={customers} setInvoices={setInvoices} setCustomers={setCustomers} />;
+                return <DashboardView invoices={invoices} customers={customers} />;
             case 'invoices':
-                return <InvoiceListView invoices={invoices} onEdit={handleEditInvoice} onDelete={deleteData} setView={handleSetView} />;
+                return <InvoiceListView invoices={invoices} onEdit={handleEditInvoice} onDelete={deleteData} />;
             case 'invoiceForm':
                 return <InvoiceForm 
                     customers={customers} 
                     onSave={(data) => { saveData('invoice', data); handleSetView('invoices'); }} 
                     onCancel={() => handleSetView('invoices')}
                     existingInvoice={editingInvoice} 
+                    getNextInvoiceNumber={getNextInvoiceNumber}
                 />;
             case 'customers':
-                return <CustomerListView customers={customers} onEdit={handleEditCustomer} onDelete={deleteData} setView={handleSetView} />;
+                return <CustomerListView customers={customers} onEdit={handleEditCustomer} onDelete={deleteData} />;
             case 'customerForm':
                 return <CustomerForm 
                     onSave={(data) => { saveData('customer', data); handleSetView('customers'); }}
@@ -97,7 +136,7 @@ export default function App() {
                     existingCustomer={editingCustomer}
                 />;
             case 'reports':
-                return <ReportsView invoices={invoices} />;
+                return <ReportsView invoices={invoices} customers={customers} />;
             default:
                 return <DashboardView invoices={invoices} customers={customers} />;
         }
@@ -131,7 +170,7 @@ const ICONS = {
     delete: "M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0",
     print: "M6.72 13.829c-.24.03-.48.062-.72.096m.72-.096a42.415 42.415 0 0110.56 0m-10.56 0L6 18.25M10 3.75v9.75m-10-8.25h16.5a1.5 1.5 0 011.5 1.5v12a1.5 1.5 0 01-1.5 1.5H3.75A1.5 1.5 0 012.25 16.5v-12a1.5 1.5 0 011.5-1.5H10V3.75z",
     download: "M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3",
-    upload: "M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"
+    email: "M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75"
 };
 
 // --- Company Details ---
@@ -215,112 +254,24 @@ const Header = ({ currentView, setView }) => {
 
 
 // --- View Components ---
-const DashboardView = ({ invoices, customers, setInvoices, setCustomers }) => {
-    const totalRevenue = invoices.reduce((sum, inv) => sum + (inv.totalAmount || 0), 0);
-    const outstanding = invoices.filter(inv => inv.status === 'pending').reduce((sum, inv) => sum + (inv.totalAmount || 0), 0);
-    const fileInputRef = useRef(null);
-
-    const handleImport = (event) => {
-        const file = event.target.files[0];
-        if (!file) return;
-
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            try {
-                if (typeof XLSX === 'undefined') {
-                    alert('Excel library not loaded yet. Please wait a moment and try again.');
-                    return;
-                }
-                const data = new Uint8Array(e.target.result);
-                const workbook = XLSX.read(data, { type: 'array' });
-                
-                // Reconstruct invoices and customers from the flat Excel data
-                const invoiceSheet = workbook.Sheets[workbook.SheetNames[0]];
-                const jsonData = XLSX.utils.sheet_to_json(invoiceSheet);
-                
-                const importedInvoices = {};
-                const importedCustomers = {};
-
-                jsonData.forEach(row => {
-                    const invoiceId = row['Invoice ID'];
-                    if (!importedInvoices[invoiceId]) {
-                        importedInvoices[invoiceId] = {
-                            id: invoiceId,
-                            invoiceNumber: row['Invoice #'],
-                            invoiceDate: row['Invoice Date'],
-                            dueDate: row['Due Date'],
-                            customerId: row['Customer ID'],
-                            customerName: row['Customer Name'],
-                            customerAddress: row['Customer Address'],
-                            customerGstin: row['Customer GSTIN'],
-                            status: row['Invoice Status'],
-                            totalAmount: row['Invoice Total'],
-                            items: []
-                        };
-                    }
-                    
-                    importedInvoices[invoiceId].items.push({
-                        description: row['Item Description'],
-                        hsn: row['HSN/SAC'],
-                        quantity: row['Quantity'],
-                        rate: row['Rate'],
-                        cgst: row['CGST Rate (%)'],
-                        sgst: row['SGST Rate (%)'],
-                        igst: row['IGST Rate (%)'],
-                        total: row['Total Item Value'],
-                    });
-
-                    const customerId = row['Customer ID'];
-                    if (!importedCustomers[customerId]) {
-                        importedCustomers[customerId] = {
-                            id: customerId,
-                            name: row['Customer Name'],
-                            address: row['Customer Address'],
-                            gstin: row['Customer GSTIN'],
-                            // Assuming email/phone are not in this export, add if they are
-                            email: '', 
-                            phone: ''
-                        };
-                    }
-                });
-
-                setInvoices(Object.values(importedInvoices));
-                setCustomers(Object.values(importedCustomers));
-                alert('Data imported successfully!');
-
-            } catch (error) {
-                console.error("Error importing file:", error);
-                alert("Failed to import data. The file might be corrupted or in the wrong format.");
-            }
-        };
-        reader.readAsArrayBuffer(file);
-        // Reset file input to allow re-uploading the same file
-        event.target.value = null;
-    };
+const DashboardView = ({ invoices, customers }) => {
+    const totalRevenue = invoices.reduce((sum, inv) => sum + (inv.amountPaid || 0), 0);
+    const outstanding = invoices.reduce((sum, inv) => sum + ((inv.totalAmount || 0) - (inv.amountPaid || 0)), 0);
 
     return (
         <div>
             <div className="bg-white p-6 rounded-lg shadow-md mb-8">
-                <h2 className="text-xl font-semibold mb-4 text-gray-700">Manage Your Data</h2>
+                <h2 className="text-xl font-semibold mb-4 text-gray-700">Welcome Back!</h2>
                 <p className="text-gray-600 mb-4">
-                    Your data is not saved automatically. Please import your last saved file to begin, and export your data before closing.
+                    Your data is saved automatically in your browser. You can export a backup from the 'Reports' page.
                 </p>
-                <div className="flex space-x-4">
-                    <button 
-                        onClick={() => fileInputRef.current.click()}
-                        className="flex items-center bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600 transition">
-                        <Icon path={ICONS.upload} className="w-5 h-5 mr-2" />
-                        Import Data from Excel
-                    </button>
-                    <input type="file" ref={fileInputRef} onChange={handleImport} className="hidden" accept=".xlsx, .xls" />
-                </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
                 <StatCard title="Total Invoices" value={invoices.length} />
                 <StatCard title="Total Customers" value={customers.length} />
-                <StatCard title="Total Revenue" value={`₹${totalRevenue.toFixed(2)}`} />
-                <StatCard title="Outstanding" value={`₹${outstanding.toFixed(2)}`} />
+                <StatCard title="Total Revenue (Paid)" value={`₹${totalRevenue.toFixed(2)}`} />
+                <StatCard title="Outstanding Amount" value={`₹${outstanding.toFixed(2)}`} />
             </div>
         </div>
     );
@@ -334,6 +285,18 @@ const StatCard = ({ title, value }) => (
 );
 
 const InvoiceListView = ({ invoices, onEdit, onDelete }) => {
+    const getStatus = (invoice) => {
+        const amountPaid = invoice.amountPaid || 0;
+        const totalAmount = invoice.totalAmount || 0;
+        if (amountPaid >= totalAmount) {
+            return { text: 'Paid', color: 'green' };
+        }
+        if (amountPaid > 0) {
+            return { text: 'Partially Paid', color: 'blue' };
+        }
+        return { text: 'Pending', color: 'yellow' };
+    };
+
     const handleDelete = (id) => {
         if (window.confirm("Are you sure you want to delete this invoice? This cannot be undone.")) {
             onDelete('invoice', id);
@@ -363,24 +326,32 @@ const InvoiceListView = ({ invoices, onEdit, onDelete }) => {
                         </tr>
                     </thead>
                     <tbody>
-                        {invoices.map(invoice => (
-                            <tr key={invoice.id} className="border-b hover:bg-gray-50">
-                                <td className="p-3 font-medium text-gray-700">{invoice.invoiceNumber}</td>
-                                <td className="p-3">{invoice.customerName}</td>
-                                <td className="p-3">{invoice.invoiceDate}</td>
-                                <td className="p-3">₹{invoice.totalAmount?.toFixed(2)}</td>
-                                <td className="p-3">
-                                    <span className={`px-2 py-1 text-xs font-semibold rounded-full ${
-                                        invoice.status === 'paid' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
-                                    }`}>{invoice.status}</span>
-                                </td>
-                                <td className="p-3 flex items-center space-x-2">
-                                    <button onClick={() => onEdit(invoice)} className="text-blue-500 hover:text-blue-700 p-1 rounded-full hover:bg-blue-100"><Icon path={ICONS.edit} className="w-5 h-5" /></button>
-                                    <button onClick={() => handleDelete(invoice.id)} className="text-red-500 hover:text-red-700 p-1 rounded-full hover:bg-red-100"><Icon path={ICONS.delete} className="w-5 h-5" /></button>
-                                    <button onClick={() => handlePrint(invoice)} className="text-gray-500 hover:text-gray-700 p-1 rounded-full hover:bg-gray-100"><Icon path={ICONS.print} className="w-5 h-5" /></button>
-                                </td>
-                            </tr>
-                        ))}
+                        {invoices.map(invoice => {
+                            const status = getStatus(invoice);
+                            const colorClasses = {
+                                green: 'bg-green-100 text-green-800',
+                                blue: 'bg-blue-100 text-blue-800',
+                                yellow: 'bg-yellow-100 text-yellow-800',
+                            };
+                            return (
+                                <tr key={invoice.id} className="border-b hover:bg-gray-50">
+                                    <td className="p-3 font-medium text-gray-700">{invoice.invoiceNumber}</td>
+                                    <td className="p-3">{invoice.customerName}</td>
+                                    <td className="p-3">{invoice.invoiceDate}</td>
+                                    <td className="p-3">₹{invoice.totalAmount?.toFixed(2)}</td>
+                                    <td className="p-3">
+                                        <span className={`px-2 py-1 text-xs font-semibold rounded-full ${colorClasses[status.color]}`}>
+                                            {status.text}
+                                        </span>
+                                    </td>
+                                    <td className="p-3 flex items-center space-x-2">
+                                        <button onClick={() => onEdit(invoice)} className="text-blue-500 hover:text-blue-700 p-1 rounded-full hover:bg-blue-100"><Icon path={ICONS.edit} className="w-5 h-5" /></button>
+                                        <button onClick={() => handleDelete(invoice.id)} className="text-red-500 hover:text-red-700 p-1 rounded-full hover:bg-red-100"><Icon path={ICONS.delete} className="w-5 h-5" /></button>
+                                        <button onClick={() => handlePrint(invoice)} className="text-gray-500 hover:text-gray-700 p-1 rounded-full hover:bg-gray-100"><Icon path={ICONS.print} className="w-5 h-5" /></button>
+                                    </td>
+                                </tr>
+                            );
+                        })}
                     </tbody>
                 </table>
             </div>
@@ -402,6 +373,7 @@ const CustomerListView = ({ customers, onEdit, onDelete }) => {
                     <thead>
                         <tr className="bg-gray-50 border-b">
                             <th className="p-3">Name</th>
+                            <th className="p-3">Company</th>
                             <th className="p-3">Email</th>
                             <th className="p-3">Phone</th>
                             <th className="p-3">Actions</th>
@@ -411,6 +383,7 @@ const CustomerListView = ({ customers, onEdit, onDelete }) => {
                         {customers.map(customer => (
                             <tr key={customer.id} className="border-b hover:bg-gray-50">
                                 <td className="p-3 font-medium text-gray-700">{customer.name}</td>
+                                <td className="p-3">{customer.companyName}</td>
                                 <td className="p-3">{customer.email}</td>
                                 <td className="p-3">{customer.phone}</td>
                                 <td className="p-3 flex items-center space-x-2">
@@ -426,7 +399,7 @@ const CustomerListView = ({ customers, onEdit, onDelete }) => {
     );
 };
 
-const ReportsView = ({ invoices }) => {
+const ReportsView = ({ invoices, customers }) => {
     const exportToExcel = () => {
         if (typeof XLSX === 'undefined') {
             alert('Excel library is loading. Please try again in a moment.');
@@ -455,8 +428,10 @@ const ReportsView = ({ invoices }) => {
                 'IGST Rate (%)': item.igst,
                 'IGST Amount': (item.quantity * item.rate * item.igst) / 100,
                 'Total Item Value': item.total,
+                'Freight Charges': invoice.freightCharges || 0,
                 'Invoice Total': invoice.totalAmount,
-                'Invoice Status': invoice.status,
+                'Amount Paid': invoice.amountPaid || 0,
+                'Remaining Amount': (invoice.totalAmount || 0) - (invoice.amountPaid || 0),
             }))
         );
 
@@ -474,49 +449,77 @@ const ReportsView = ({ invoices }) => {
         document.body.removeChild(link);
     };
 
-    // Simple monthly summary
-    const monthlyData = invoices.reduce((acc, inv) => {
-        try {
-            const month = new Date(inv.invoiceDate).toLocaleString('default', { month: 'long', year: 'numeric' });
-            if (!acc[month]) {
-                acc[month] = { total: 0, count: 0 };
-            }
-            acc[month].total += inv.totalAmount || 0;
-            acc[month].count += 1;
-        } catch (e) {
-            // Ignore invalid dates
-        }
-        return acc;
-    }, {});
+    const handleSendReminder = (invoice, customer, remainingAmount, dueDays) => {
+        const subject = `Payment Reminder for Invoice #${invoice.invoiceNumber}`;
+        const body = `
+Dear ${customer.name},
+
+This is a friendly reminder regarding invoice #${invoice.invoiceNumber}, which was due ${dueDays} days ago.
+
+The remaining amount to be paid is ₹${remainingAmount.toFixed(2)}.
+
+We would appreciate it if you could look into this at your earliest convenience. Please let us know if you have any questions.
+
+Thank you for your business.
+
+Best regards,
+ParthaSarthi Engineering and Training Services
+        `;
+        const mailtoLink = `mailto:${customer.email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body.trim())}`;
+        window.location.href = mailtoLink;
+    };
 
     return (
         <div className="bg-white p-6 rounded-lg shadow-md">
             <div className="flex justify-between items-center mb-6">
-                <h2 className="text-xl font-semibold text-gray-700">GST & Sales Reports</h2>
+                <h2 className="text-xl font-semibold text-gray-700">Financial Reports</h2>
                 <button onClick={exportToExcel} className="flex items-center bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600 transition">
                     <Icon path={ICONS.download} className="w-5 h-5 mr-2" />
                     Export Master Excel
                 </button>
             </div>
             
-            <h3 className="text-lg font-semibold text-gray-600 mb-4">Monthly Summary</h3>
+            <h3 className="text-lg font-semibold text-gray-600 mb-4">Outstanding Invoices</h3>
             <div className="overflow-x-auto">
                 <table className="w-full text-left">
                     <thead>
                         <tr className="bg-gray-50 border-b">
-                            <th className="p-3">Month</th>
-                            <th className="p-3">Invoices Issued</th>
-                            <th className="p-3">Total Sales</th>
+                            <th className="p-3">Invoice #</th>
+                            <th className="p-3">Customer</th>
+                            <th className="p-3">Amount Received</th>
+                            <th className="p-3">Remaining Amount</th>
+                            <th className="p-3">Due Since (Days)</th>
+                            <th className="p-3">Action</th>
                         </tr>
                     </thead>
                     <tbody>
-                        {Object.entries(monthlyData).map(([month, data]) => (
-                            <tr key={month} className="border-b hover:bg-gray-50">
-                                <td className="p-3">{month}</td>
-                                <td className="p-3">{data.count}</td>
-                                <td className="p-3">₹{data.total.toFixed(2)}</td>
-                            </tr>
-                        ))}
+                        {invoices.filter(inv => (inv.totalAmount || 0) > (inv.amountPaid || 0)).map(invoice => {
+                            const remainingAmount = (invoice.totalAmount || 0) - (invoice.amountPaid || 0);
+                            const dueDate = new Date(invoice.dueDate);
+                            const today = new Date();
+                            const dueDays = Math.floor((today - dueDate) / (1000 * 60 * 60 * 24));
+                            const customer = customers.find(c => c.id === invoice.customerId);
+
+                            return (
+                                <tr key={invoice.id} className="border-b hover:bg-gray-50">
+                                    <td className="p-3">{invoice.invoiceNumber}</td>
+                                    <td className="p-3">{invoice.customerName}</td>
+                                    <td className="p-3">₹{(invoice.amountPaid || 0).toFixed(2)}</td>
+                                    <td className="p-3 font-bold">₹{remainingAmount.toFixed(2)}</td>
+                                    <td className={`p-3 ${dueDays > 0 ? 'text-red-600 font-semibold' : ''}`}>{dueDays > 0 ? dueDays : 'N/A'}</td>
+                                    <td className="p-3">
+                                        {customer && customer.email && dueDays > 0 && (
+                                            <button 
+                                                onClick={() => handleSendReminder(invoice, customer, remainingAmount, dueDays)}
+                                                className="flex items-center text-sm bg-blue-500 text-white px-3 py-1 rounded-lg hover:bg-blue-600 transition">
+                                                <Icon path={ICONS.email} className="w-4 h-4 mr-2" />
+                                                Send Reminder
+                                            </button>
+                                        )}
+                                    </td>
+                                </tr>
+                            );
+                        })}
                     </tbody>
                 </table>
             </div>
@@ -525,18 +528,19 @@ const ReportsView = ({ invoices }) => {
 };
 
 // --- Form Components ---
-const InvoiceForm = ({ customers, onSave, onCancel, existingInvoice }) => {
+const InvoiceForm = ({ customers, onSave, onCancel, existingInvoice, getNextInvoiceNumber }) => {
     const [invoiceData, setInvoiceData] = useState({
         id: existingInvoice?.id || null,
-        invoiceNumber: existingInvoice?.invoiceNumber || '',
+        invoiceNumber: existingInvoice?.invoiceNumber || getNextInvoiceNumber(),
         invoiceDate: existingInvoice?.invoiceDate || new Date().toISOString().split('T')[0],
         dueDate: existingInvoice?.dueDate || '',
         customerId: existingInvoice?.customerId || '',
         customerName: existingInvoice?.customerName || '',
         customerAddress: existingInvoice?.customerAddress || '',
         customerGstin: existingInvoice?.customerGstin || '',
-        items: existingInvoice?.items || [{ description: '', hsn: '', quantity: 1, rate: 0, cgst: 0, sgst: 0, igst: 0, total: 0 }],
-        status: existingInvoice?.status || 'pending',
+        items: existingInvoice?.items || [{ description: '', hsn: '', quantity: 1, rate: 0, gstType: 'cgst_sgst', cgst: 0, sgst: 0, igst: 0, total: 0 }],
+        freightCharges: existingInvoice?.freightCharges || 0,
+        amountPaid: existingInvoice?.amountPaid || 0,
     });
 
     const handleCustomerSelect = (e) => {
@@ -555,12 +559,18 @@ const InvoiceForm = ({ customers, onSave, onCancel, existingInvoice }) => {
     const handleItemChange = (index, field, value) => {
         const newItems = [...invoiceData.items];
         newItems[index][field] = value;
+
+        if(field === 'gstType') {
+            newItems[index].cgst = 0;
+            newItems[index].sgst = 0;
+            newItems[index].igst = 0;
+        }
         
         const item = newItems[index];
         const taxableValue = (item.quantity || 0) * (item.rate || 0);
-        const cgstAmount = taxableValue * (item.cgst || 0) / 100;
-        const sgstAmount = taxableValue * (item.sgst || 0) / 100;
-        const igstAmount = taxableValue * (item.igst || 0) / 100;
+        const cgstAmount = item.gstType === 'cgst_sgst' ? taxableValue * (item.cgst || 0) / 100 : 0;
+        const sgstAmount = item.gstType === 'cgst_sgst' ? taxableValue * (item.sgst || 0) / 100 : 0;
+        const igstAmount = item.gstType === 'igst' ? taxableValue * (item.igst || 0) / 100 : 0;
         newItems[index].total = taxableValue + cgstAmount + sgstAmount + igstAmount;
         
         setInvoiceData({ ...invoiceData, items: newItems });
@@ -569,7 +579,7 @@ const InvoiceForm = ({ customers, onSave, onCancel, existingInvoice }) => {
     const addItem = () => {
         setInvoiceData({
             ...invoiceData,
-            items: [...invoiceData.items, { description: '', hsn: '', quantity: 1, rate: 0, cgst: 0, sgst: 0, igst: 0, total: 0 }]
+            items: [...invoiceData.items, { description: '', hsn: '', quantity: 1, rate: 0, gstType: 'cgst_sgst', cgst: 0, sgst: 0, igst: 0, total: 0 }]
         });
     };
 
@@ -580,18 +590,24 @@ const InvoiceForm = ({ customers, onSave, onCancel, existingInvoice }) => {
 
     const handleSubmit = (e) => {
         e.preventDefault();
-        const totalAmount = invoiceData.items.reduce((sum, item) => sum + item.total, 0);
+        const subTotal = invoiceData.items.reduce((sum, item) => sum + (item.quantity * item.rate), 0);
+        const totalTax = invoiceData.items.reduce((sum, item) => sum + (item.total - (item.quantity * item.rate)), 0);
+        const freight = parseFloat(invoiceData.freightCharges) || 0;
+        const totalAmount = subTotal + totalTax + freight;
         onSave({ ...invoiceData, totalAmount });
     };
     
     const subTotal = invoiceData.items.reduce((sum, item) => sum + (item.quantity * item.rate), 0);
     const totalTax = invoiceData.items.reduce((sum, item) => sum + (item.total - (item.quantity * item.rate)), 0);
-    const totalAmount = subTotal + totalTax;
+    const freight = parseFloat(invoiceData.freightCharges) || 0;
+    const totalAmount = subTotal + totalTax + freight;
+    const amountPaid = parseFloat(invoiceData.amountPaid) || 0;
+    const amountDue = totalAmount - amountPaid;
 
     return (
         <form onSubmit={handleSubmit} className="bg-white p-8 rounded-lg shadow-md space-y-6">
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                <InputField label="Invoice #" value={invoiceData.invoiceNumber} onChange={e => setInvoiceData({...invoiceData, invoiceNumber: e.target.value})} required />
+                <InputField label="Invoice #" value={invoiceData.invoiceNumber} readOnly />
                 <InputField label="Invoice Date" type="date" value={invoiceData.invoiceDate} onChange={e => setInvoiceData({...invoiceData, invoiceDate: e.target.value})} required />
                 <InputField label="Due Date" type="date" value={invoiceData.dueDate} onChange={e => setInvoiceData({...invoiceData, dueDate: e.target.value})} />
             </div>
@@ -602,7 +618,7 @@ const InvoiceForm = ({ customers, onSave, onCancel, existingInvoice }) => {
                         <label className="mb-1 font-medium text-gray-600">Select Customer</label>
                         <select onChange={handleCustomerSelect} value={invoiceData.customerId} className="p-2 border rounded-md bg-white">
                             <option value="">-- Select Existing Customer --</option>
-                            {customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                            {customers.map(c => <option key={c.id} value={c.id}>{c.name} ({c.companyName})</option>)}
                         </select>
                     </div>
                     <InputField label="Customer Name" value={invoiceData.customerName} onChange={e => setInvoiceData({...invoiceData, customerName: e.target.value})} required />
@@ -620,9 +636,8 @@ const InvoiceForm = ({ customers, onSave, onCancel, existingInvoice }) => {
                                 <th className="p-2 text-left text-sm font-semibold text-gray-600 w-24">HSN/SAC</th>
                                 <th className="p-2 text-left text-sm font-semibold text-gray-600 w-20">Qty</th>
                                 <th className="p-2 text-left text-sm font-semibold text-gray-600 w-28">Rate</th>
-                                <th className="p-2 text-left text-sm font-semibold text-gray-600 w-20">CGST (%)</th>
-                                <th className="p-2 text-left text-sm font-semibold text-gray-600 w-20">SGST (%)</th>
-                                <th className="p-2 text-left text-sm font-semibold text-gray-600 w-20">IGST (%)</th>
+                                <th className="p-2 text-left text-sm font-semibold text-gray-600 w-32">GST Type</th>
+                                <th className="p-2 text-left text-sm font-semibold text-gray-600 w-20">Tax (%)</th>
                                 <th className="p-2 text-right text-sm font-semibold text-gray-600 w-32">Total</th>
                                 <th className="p-2 w-12"></th>
                             </tr>
@@ -634,9 +649,22 @@ const InvoiceForm = ({ customers, onSave, onCancel, existingInvoice }) => {
                                     <td><input type="text" value={item.hsn} onChange={e => handleItemChange(index, 'hsn', e.target.value)} className="w-full p-2 border rounded-md" /></td>
                                     <td><input type="number" value={item.quantity} onChange={e => handleItemChange(index, 'quantity', parseFloat(e.target.value))} className="w-full p-2 border rounded-md" /></td>
                                     <td><input type="number" value={item.rate} onChange={e => handleItemChange(index, 'rate', parseFloat(e.target.value))} className="w-full p-2 border rounded-md" /></td>
-                                    <td><input type="number" value={item.cgst} onChange={e => handleItemChange(index, 'cgst', parseFloat(e.target.value))} className="w-full p-2 border rounded-md" /></td>
-                                    <td><input type="number" value={item.sgst} onChange={e => handleItemChange(index, 'sgst', parseFloat(e.target.value))} className="w-full p-2 border rounded-md" /></td>
-                                    <td><input type="number" value={item.igst} onChange={e => handleItemChange(index, 'igst', parseFloat(e.target.value))} className="w-full p-2 border rounded-md" /></td>
+                                    <td>
+                                        <select value={item.gstType} onChange={e => handleItemChange(index, 'gstType', e.target.value)} className="w-full p-2 border rounded-md bg-white">
+                                            <option value="cgst_sgst">CGST/SGST</option>
+                                            <option value="igst">IGST</option>
+                                        </select>
+                                    </td>
+                                    <td>
+                                        {item.gstType === 'cgst_sgst' ? (
+                                            <div className="flex space-x-1">
+                                                <input placeholder="CGST" type="number" value={item.cgst} onChange={e => handleItemChange(index, 'cgst', parseFloat(e.target.value))} className="w-1/2 p-2 border rounded-md" />
+                                                <input placeholder="SGST" type="number" value={item.sgst} onChange={e => handleItemChange(index, 'sgst', parseFloat(e.target.value))} className="w-1/2 p-2 border rounded-md" />
+                                            </div>
+                                        ) : (
+                                            <input placeholder="IGST" type="number" value={item.igst} onChange={e => handleItemChange(index, 'igst', parseFloat(e.target.value))} className="w-full p-2 border rounded-md" />
+                                        )}
+                                    </td>
                                     <td className="p-2 text-right font-medium">₹{item.total.toFixed(2)}</td>
                                     <td><button type="button" onClick={() => removeItem(index)} className="text-red-500 hover:text-red-700 p-2"><Icon path={ICONS.delete} className="w-5 h-5"/></button></td>
                                 </tr>
@@ -649,20 +677,24 @@ const InvoiceForm = ({ customers, onSave, onCancel, existingInvoice }) => {
                 </button>
             </div>
             <div className="flex justify-end mt-6">
-                <div className="w-full md:w-1/3 space-y-2">
-                    <div className="flex justify-between"><span className="text-gray-600">Subtotal:</span> <span>₹{subTotal.toFixed(2)}</span></div>
+                <div className="w-full md:w-1/2 space-y-2">
+                    <div className="flex justify-between items-center">
+                        <span className="text-gray-600">Freight Charges:</span>
+                        <input type="number" value={invoiceData.freightCharges} onChange={e => setInvoiceData({...invoiceData, freightCharges: e.target.value})} className="w-32 p-2 border rounded-md" />
+                    </div>
+                     <div className="flex justify-between"><span className="text-gray-600">Subtotal:</span> <span>₹{subTotal.toFixed(2)}</span></div>
                     <div className="flex justify-between"><span className="text-gray-600">Total Tax:</span> <span>₹{totalTax.toFixed(2)}</span></div>
-                    <div className="flex justify-between font-bold text-xl"><span className="text-gray-800">Total:</span> <span>₹{totalAmount.toFixed(2)}</span></div>
+                    <hr/>
+                    <div className="flex justify-between font-bold text-lg"><span className="text-gray-800">Total Amount:</span> <span>₹{totalAmount.toFixed(2)}</span></div>
+                    <div className="flex justify-between items-center">
+                        <span className="text-gray-600">Amount Paid:</span>
+                        <input type="number" value={invoiceData.amountPaid} onChange={e => setInvoiceData({...invoiceData, amountPaid: e.target.value})} className="w-32 p-2 border rounded-md" />
+                    </div>
+                    <div className="flex justify-between font-bold text-xl text-red-600"><span className="text-gray-800">Amount Due:</span> <span>₹{amountDue.toFixed(2)}</span></div>
+
                 </div>
             </div>
             <div className="flex justify-end space-x-4 border-t pt-6">
-                 <div className="flex-1">
-                    <label className="mb-1 font-medium text-gray-600">Status</label>
-                    <select value={invoiceData.status} onChange={e => setInvoiceData({...invoiceData, status: e.target.value})} className="p-2 border rounded-md bg-white w-full md:w-auto">
-                        <option value="pending">Pending</option>
-                        <option value="paid">Paid</option>
-                    </select>
-                </div>
                 <button type="button" onClick={onCancel} className="px-6 py-2 rounded-lg bg-gray-200 hover:bg-gray-300">Cancel</button>
                 <button type="submit" className="px-6 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 font-semibold">{existingInvoice ? 'Update Invoice' : 'Save Invoice'}</button>
             </div>
@@ -674,6 +706,7 @@ const CustomerForm = ({ onSave, onCancel, existingCustomer }) => {
     const [customerData, setCustomerData] = useState({
         id: existingCustomer?.id || null,
         name: existingCustomer?.name || '',
+        companyName: existingCustomer?.companyName || '',
         email: existingCustomer?.email || '',
         phone: existingCustomer?.phone || '',
         address: existingCustomer?.address || '',
@@ -687,7 +720,8 @@ const CustomerForm = ({ onSave, onCancel, existingCustomer }) => {
 
     return (
         <form onSubmit={handleSubmit} className="bg-white p-8 rounded-lg shadow-md space-y-6 max-w-lg mx-auto">
-            <InputField label="Name" value={customerData.name} onChange={e => setCustomerData({...customerData, name: e.target.value})} required />
+            <InputField label="Contact Person Name" value={customerData.name} onChange={e => setCustomerData({...customerData, name: e.target.value})} required />
+            <InputField label="Company Name" value={customerData.companyName} onChange={e => setCustomerData({...customerData, companyName: e.target.value})} />
             <InputField label="Email" type="email" value={customerData.email} onChange={e => setCustomerData({...customerData, email: e.target.value})} />
             <InputField label="Phone" value={customerData.phone} onChange={e => setCustomerData({...customerData, phone: e.target.value})} />
             <InputField label="Address" value={customerData.address} onChange={e => setCustomerData({...customerData, address: e.target.value})} />
@@ -700,7 +734,7 @@ const CustomerForm = ({ onSave, onCancel, existingCustomer }) => {
     );
 };
 
-const InputField = ({ label, type = 'text', value, onChange, required = false }) => (
+const InputField = ({ label, type = 'text', value, onChange, required = false, readOnly = false }) => (
     <div className="flex flex-col">
         <label className="mb-1 font-medium text-gray-600">{label}</label>
         <input
@@ -708,7 +742,8 @@ const InputField = ({ label, type = 'text', value, onChange, required = false })
             value={value}
             onChange={onChange}
             required={required}
-            className="p-2 border rounded-md focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+            readOnly={readOnly}
+            className={`p-2 border rounded-md focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 ${readOnly ? 'bg-gray-100' : ''}`}
         />
     </div>
 );
@@ -717,7 +752,10 @@ const InputField = ({ label, type = 'text', value, onChange, required = false })
 const generatePrintableInvoice = (invoice) => {
     const subTotal = invoice.items.reduce((sum, item) => sum + (item.quantity * item.rate), 0);
     const totalTax = invoice.items.reduce((sum, item) => sum + (item.total - (item.quantity * item.rate)), 0);
+    const freight = parseFloat(invoice.freightCharges) || 0;
     const totalAmount = invoice.totalAmount;
+    const amountPaid = invoice.amountPaid || 0;
+    const amountDue = totalAmount - amountPaid;
 
     const itemsHtml = invoice.items.map(item => `
         <tr class="item">
@@ -796,9 +834,23 @@ const generatePrintableInvoice = (invoice) => {
                             <td colspan="6" class="text-right">Total Tax:</td>
                             <td class="text-right">₹${totalTax.toFixed(2)}</td>
                         </tr>
+                         ${freight > 0 ? `
+                        <tr class="total">
+                            <td colspan="6" class="text-right">Freight Charges:</td>
+                            <td class="text-right">₹${freight.toFixed(2)}</td>
+                        </tr>
+                        ` : ''}
                         <tr class="total">
                             <td colspan="6" class="text-right"><strong>Total Amount:</strong></td>
                             <td class="text-right"><strong>₹${totalAmount.toFixed(2)}</strong></td>
+                        </tr>
+                         <tr class="total">
+                            <td colspan="6" class="text-right">Amount Paid:</td>
+                            <td class="text-right">₹${amountPaid.toFixed(2)}</td>
+                        </tr>
+                         <tr class="total" style="color: red;">
+                            <td colspan="6" class="text-right"><strong>Amount Due:</strong></td>
+                            <td class="text-right"><strong>₹${amountDue.toFixed(2)}</strong></td>
                         </tr>
                     </table>
                 </div>

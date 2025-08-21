@@ -24,9 +24,12 @@
     "extends": [
       "react-app",
       "react-app/jest"
-    ]
+    ],
+    "rules": {
+      "no-unused-vars": "warn"
+    }
   },
-  "browserslist": {
+  "browslist": {
     "production": [
       ">0.2%",
       "not dead",
