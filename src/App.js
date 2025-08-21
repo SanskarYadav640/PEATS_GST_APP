@@ -1,880 +1,1236 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 /* global XLSX */
 
-// --- Main App Component ---
-export default function App() {
-    // --- State Initialization ---
-    const [invoices, setInvoices] = useState(() => {
-        try {
-            const savedInvoices = localStorage.getItem('peats-invoices');
-            return savedInvoices ? JSON.parse(savedInvoices) : [];
-        } catch (error) {
-            console.error("Error parsing invoices from localStorage", error);
-            return [];
-        }
-    });
+/**
+ * PEATS — GST Invoice System (Persistent + GST Dropdown + Series Format)
+ *
+ * ✅ Data persistence: autosaves to localStorage (auto-loads every time you open)
+ * ✅ GST selector: choose CGST+SGST or IGST, then pick % from a dropdown (0, 0.1, 0.25, 3, 5, 12, 18, 28)
+ * ✅ Invoice series: PINV/YYYY/MM/DD980001 (e.g. PINV/2025/08/21980001) — per-day sequence starting at 980001
+ * ✅ Excel import/export (SheetJS)
+ * ✅ Print-friendly A4 invoices (inline CSS)
+ * ✅ Design/UX tidy (Tailwind classes)
+ */
 
-    const [customers, setCustomers] = useState(() => {
-        try {
-            const savedCustomers = localStorage.getItem('peats-customers');
-            return savedCustomers ? JSON.parse(savedCustomers) : [];
-        } catch (error) {
-            console.error("Error parsing customers from localStorage", error);
-            return [];
-        }
-    });
+/* ------------------------------ Utils & Constants ------------------------------ */
+const CURRENCY = new Intl.NumberFormat("en-IN", {
+  style: "currency",
+  currency: "INR",
+  minimumFractionDigits: 2,
+});
+const fmtInr = (n = 0) => CURRENCY.format(Number.isFinite(n) ? n : 0);
+const safeNum = (v) => (Number.isFinite(v) ? v : Number.isFinite(+v) ? +v : 0);
+const idGen = () => (crypto?.randomUUID ? crypto.randomUUID() : Date.now().toString());
+const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+const sum = (arr, key) => arr.reduce((acc, it) => acc + safeNum(it[key] ?? 0), 0);
 
-    const [currentView, setCurrentView] = useState('dashboard');
-    const [editingInvoice, setEditingInvoice] = useState(null);
-    const [editingCustomer, setEditingCustomer] = useState(null);
-    const [isXlsxLoaded, setIsXlsxLoaded] = useState(false);
+const GSTIN_REGEX = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/i;
+const GST_RATES = [0, 0.1, 0.25, 3, 5, 12, 18, 28];
 
-    // --- Effect to save data to localStorage whenever it changes ---
-    useEffect(() => {
-        try {
-            localStorage.setItem('peats-invoices', JSON.stringify(invoices));
-            localStorage.setItem('peats-customers', JSON.stringify(customers));
-        } catch (error) {
-            console.error("Error saving data to localStorage", error);
-        }
-    }, [invoices, customers]);
+const calcItem = (item) => {
+  const qty = Math.max(0, safeNum(item.quantity));
+  const rate = Math.max(0, safeNum(item.rate));
+  const taxable = round2(qty * rate);
+  const cgstAmt = round2((taxable * Math.max(0, safeNum(item.cgst))) / 100);
+  const sgstAmt = round2((taxable * Math.max(0, safeNum(item.sgst))) / 100);
+  const igstAmt = round2((taxable * Math.max(0, safeNum(item.igst))) / 100);
+  const total = round2(taxable + cgstAmt + sgstAmt + igstAmt);
+  return { taxable, cgstAmt, sgstAmt, igstAmt, total };
+};
 
-    // --- Dynamically load xlsx library ---
-    useEffect(() => {
-        const script = document.createElement('script');
-        script.src = 'https://cdn.sheetjs.com/xlsx-0.20.1/package/xlsx.full.min.js';
-        script.async = true;
-        script.onload = () => {
-            setIsXlsxLoaded(true);
-        };
-        document.head.appendChild(script);
+// Invoice number generator — PINV/YYYY/MM/DD980001 (per day; sequence starts at 980001)
+function nextInvoiceNumberForDate(dateStr, existingInvoices = []) {
+  if (!dateStr) {
+    const today = new Date();
+    const yyyy = String(today.getFullYear());
+    const mm = String(today.getMonth() + 1).padStart(2, "0");
+    const dd = String(today.getDate()).padStart(2, "0");
+    return `PINV/${yyyy}/${mm}/${dd}${980001}`;
+  }
+  const yyyy = dateStr.slice(0, 4);
+  const mm = dateStr.slice(5, 7);
+  const dd = dateStr.slice(8, 10);
+  const prefix = `PINV/${yyyy}/${mm}/${dd}`;
 
-        return () => {
-            if (script.parentNode) {
-                script.parentNode.removeChild(script);
-            }
-        }
-    }, []);
+  const seqs = existingInvoices
+    .map((inv) => inv?.invoiceNumber)
+    .filter((n) => typeof n === "string" && n.startsWith(prefix))
+    .map((n) => {
+      const m = n.slice(prefix.length).match(/(\d{6,})$/);
+      return m ? parseInt(m[1], 10) : null;
+    })
+    .filter((x) => x !== null);
 
-    // --- Event Handlers ---
-    const handleSetView = (view) => {
-        setEditingInvoice(null);
-        setEditingCustomer(null);
-        setCurrentView(view);
-    };
-
-    const handleEditInvoice = (invoice) => {
-        setEditingInvoice(invoice);
-        setCurrentView('invoiceForm');
-    };
-
-    const handleEditCustomer = (customer) => {
-        setEditingCustomer(customer);
-        setCurrentView('customerForm');
-    };
-    
-    // --- Data Management Functions ---
-    const saveData = (type, data) => {
-        const id = data.id || Date.now().toString();
-        const finalData = { ...data, id };
-
-        if (type === 'invoice') {
-            setInvoices(prev => {
-                const exists = prev.some(item => item.id === id);
-                if (exists) {
-                    return prev.map(item => item.id === id ? finalData : item);
-                }
-                return [...prev, finalData];
-            });
-        } else if (type === 'customer') {
-            setCustomers(prev => {
-                const exists = prev.some(item => item.id === id);
-                if (exists) {
-                    return prev.map(item => item.id === id ? finalData : item);
-                }
-                return [...prev, finalData];
-            });
-        }
-    };
-
-    const deleteData = (type, id) => {
-        if (type === 'invoice') {
-            setInvoices(prev => prev.filter(item => item.id !== id));
-        } else if (type === 'customer') {
-            setCustomers(prev => prev.filter(item => item.id !== id));
-        }
-    };
-
-    const getNextInvoiceNumber = () => {
-        const lastInvoice = invoices
-            .filter(inv => inv.invoiceNumber.startsWith('PINV980'))
-            .map(inv => parseInt(inv.invoiceNumber.replace('PINV980', ''), 10))
-            .sort((a, b) => a - b)
-            .pop();
-
-        const lastNum = lastInvoice || 0;
-        return `PINV980${(lastNum + 1).toString().padStart(3, '0')}`;
-    };
-
-    const renderView = () => {
-        switch (currentView) {
-            case 'dashboard':
-                return <DashboardView invoices={invoices} customers={customers} />;
-            case 'invoices':
-                return <InvoiceListView invoices={invoices} onEdit={handleEditInvoice} onDelete={deleteData} />;
-            case 'invoiceForm':
-                return <InvoiceForm 
-                    customers={customers} 
-                    onSave={(data) => { saveData('invoice', data); handleSetView('invoices'); }} 
-                    onCancel={() => handleSetView('invoices')}
-                    existingInvoice={editingInvoice} 
-                    getNextInvoiceNumber={getNextInvoiceNumber}
-                />;
-            case 'customers':
-                return <CustomerListView customers={customers} onEdit={handleEditCustomer} onDelete={deleteData} />;
-            case 'customerForm':
-                return <CustomerForm 
-                    onSave={(data) => { saveData('customer', data); handleSetView('customers'); }}
-                    onCancel={() => handleSetView('customers')}
-                    existingCustomer={editingCustomer}
-                />;
-            case 'reports':
-                return <ReportsView invoices={invoices} customers={customers} isXlsxLoaded={isXlsxLoaded} />;
-            default:
-                return <DashboardView invoices={invoices} customers={customers} />;
-        }
-    };
-
-    return (
-        <div className="flex h-screen bg-gray-100 font-sans">
-            <Sidebar currentView={currentView} setView={handleSetView} />
-            <main className="flex-1 p-6 sm:p-8 md:p-10 overflow-y-auto">
-                <Header currentView={currentView} setView={handleSetView} />
-                {renderView()}
-            </main>
-        </div>
-    );
+  const base = 980001;
+  const next = seqs.length ? Math.max(...seqs) + 1 : base;
+  return `${prefix}${next}`;
 }
 
-// --- SVG Icons ---
-const Icon = ({ path, className = "w-6 h-6" }) => (
-    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className}>
-        <path strokeLinecap="round" strokeLinejoin="round" d={path} />
-    </svg>
+/* ------------------------------ Company Details ------------------------------ */
+const companyDetails = {
+  name: "ParthaSarthi Engineering and Training Services (PEATS)",
+  phone: "7617001477, 9889031719",
+  email: "Parthasarthiconsultancy@gmail.com",
+  owners: "Mr. Ramkaran Yadav & Mr. Ajay Shankar Amist",
+  address:
+    "Tower 3, Goldfinch, Paarth Republic, Kanpur Road, Miranpur, Pinvat, Banthra, Sikandarpur, Post- Banthra Dist. - Lucknow, Pin- 226401",
+};
+
+/* ------------------------------ Icons ------------------------------ */
+const Icon = ({ path, className = "w-5 h-5" }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className}>
+    <path strokeLinecap="round" strokeLinejoin="round" d={path} />
+  </svg>
 );
 
 const ICONS = {
-    dashboard: "M3.75 13.5l3.75-3.75m0 0h16.5m-16.5 0l3.75 3.75M3.75 6.75h16.5",
-    invoice: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z",
-    customers: "M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m-7.042-2.72a3 3 0 00-4.682 2.72 9.094 9.094 0 003.741.479m7.042-2.72a3 3 0 00-4.682 2.72M12 18.72a9.094 9.094 0 01-3.741-.479 3 3 0 014.682-2.72m-3.182 2.72a3 3 0 014.682 2.72 9.094 9.094 0 01-3.741.479M12 12a3 3 0 100-6 3 3 0 000 6z",
-    reports: "M3.75 3v11.25A2.25 2.25 0 006 16.5h12A2.25 2.25 0 0020.25 14.25V3M3.75 3H20.25M3.75 3v.375c0 .621.504 1.125 1.125 1.125h14.25c.621 0 1.125-.504 1.125-1.125V3",
-    add: "M12 4.5v15m7.5-7.5h-15",
-    edit: "M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10",
-    delete: "M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0",
-    print: "M6.72 13.829c-.24.03-.48.062-.72.096m.72-.096a42.415 42.415 0 0110.56 0m-10.56 0L6 18.25M10 3.75v9.75m-10-8.25h16.5a1.5 1.5 0 011.5 1.5v12a1.5 1.5 0 01-1.5 1.5H3.75A1.5 1.5 0 012.25 16.5v-12a1.5 1.5 0 011.5-1.5H10V3.75z",
-    download: "M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3",
-    email: "M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75"
+  dashboard: "M3 3h18M3 7h18M3 21h18M3 7v14m6-14v14m6-14v14m6-14v14",
+  invoice: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z",
+  customers: "M18 18.72a9.094 9.094 0 003.741-.479 3 3 0 00-4.682-2.72m-7.042-2.72a3 3 0 00-4.682 2.72 9.094 9.094 0 003.741.479m7.042-2.72a3 3 0 00-4.682 2.72M12 12a3 3 0 100-6 3 3 0 000 6z",
+  reports: "M3.75 3v11.25A2.25 2.25 0 006 16.5h12A2.25 2.25 0 0020.25 14.25V3M3.75 3H20.25M3.75 3v.375c0 .621.504 1.125 1.125 1.125h14.25c.621 0 1.125-.504 1.125-1.125V3",
+  add: "M12 4.5v15m7.5-7.5h-15",
+  edit: "M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10",
+  delete: "M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0",
+  print: "M6.72 13.829c-.24.03-.48.062-.72.096m.72-.096a42.415 42.415 0 0110.56 0m-10.56 0L6 18.25M10 3.75v9.75m-10-8.25h16.5a1.5 1.5 0 011.5 1.5v12a1.5 1.5 0 01-1.5 1.5H3.75A1.5 1.5 0 012.25 16.5v-12a1.5 1.5 0 011.5-1.5H10V3.75z",
+  download: "M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3",
+  upload: "M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5",
+  search: "M21 21l-4.35-4.35M11 18a7 7 0 100-14 7 7 0 000 14z",
+  duplicate: "M8 7h8a2 2 0 012 2v8m-2 2H8a2 2 0 01-2-2V9m2-6h8a2 2 0 012 2v2M6 11h8",
 };
 
-// --- Company Details ---
-const companyDetails = {
-    name: "ParthaSarthi Engineering and Training Services (PEATS)",
-    phone: "7617001477, 9889031719",
-    email: "Parthasarthiconsultancy@gmail.com",
-    owners: "Mr. Ramkaran Yadav & Mr. Ajay Shankar Amist",
-    address: "Tower 3, Goldfinch, Paarth Republic, Kanpur Road, Miranpur, Pinvat, Banthra, Sikandarpur, Post- Banthra Dist. - Lucknow, Pin- 226401"
+/* ------------------------------ Storage Keys ------------------------------ */
+const LS_KEYS = {
+  invoices: "peats_invoices_v1",
+  customers: "peats_customers_v1",
 };
 
-// --- Layout Components ---
+/* ------------------------------ Main App ------------------------------ */
+export default function App() {
+  const [currentView, setCurrentView] = useState("dashboard");
+  const [invoices, setInvoices] = useState(() => loadLS(LS_KEYS.invoices, []));
+  const [customers, setCustomers] = useState(() => loadLS(LS_KEYS.customers, []));
+  const [editingInvoice, setEditingInvoice] = useState(null);
+  const [editingCustomer, setEditingCustomer] = useState(null);
+  const [xlsxReady, setXlsxReady] = useState(!!window.XLSX);
+
+  // Load SheetJS at runtime
+  useEffect(() => {
+    if (window.XLSX) return;
+    const script = document.createElement("script");
+    script.src = "https://cdn.sheetjs.com/xlsx-0.20.1/package/xlsx.full.min.js";
+    script.async = true;
+    script.onload = () => setXlsxReady(true);
+    script.onerror = () => console.error("Failed to load XLSX library");
+    document.head.appendChild(script);
+    return () => script.remove();
+  }, []);
+
+  // Persist to localStorage
+  useEffect(() => saveLS(LS_KEYS.invoices, invoices), [invoices]);
+  useEffect(() => saveLS(LS_KEYS.customers, customers), [customers]);
+
+  const handleSetView = (view) => {
+    setEditingInvoice(null);
+    setEditingCustomer(null);
+    setCurrentView(view);
+  };
+
+  const saveData = (type, data) => {
+    const id = data.id || idGen();
+    const finalData = { ...data, id };
+
+    if (type === "invoice") {
+      setInvoices((prev) => {
+        const exists = prev.some((i) => i.id === id);
+        return exists ? prev.map((i) => (i.id === id ? finalData : i)) : [...prev, finalData];
+      });
+    }
+    if (type === "customer") {
+      setCustomers((prev) => {
+        const exists = prev.some((c) => c.id === id);
+        return exists ? prev.map((c) => (c.id === id ? finalData : c)) : [...prev, finalData];
+      });
+    }
+  };
+
+  const deleteData = (type, id) => {
+    if (type === "invoice") setInvoices((prev) => prev.filter((i) => i.id !== id));
+    if (type === "customer") setCustomers((prev) => prev.filter((c) => c.id !== id));
+  };
+
+  const duplicateInvoice = (invoice) => {
+    const copy = { ...invoice, id: null, invoiceNumber: `${invoice.invoiceNumber}-COPY` };
+    setEditingInvoice(copy);
+    setCurrentView("invoiceForm");
+  };
+
+  const renderView = () => {
+    switch (currentView) {
+      case "dashboard":
+        return (
+          <DashboardView
+            invoices={invoices}
+            customers={customers}
+            setInvoices={setInvoices}
+            setCustomers={setCustomers}
+            xlsxReady={xlsxReady}
+          />
+        );
+      case "invoices":
+        return (
+          <InvoiceListView
+            invoices={invoices}
+            onEdit={(inv) => {
+              setEditingInvoice(inv);
+              setCurrentView("invoiceForm");
+            }}
+            onDelete={deleteData}
+            onDuplicate={duplicateInvoice}
+          />
+        );
+      case "invoiceForm":
+        return (
+          <InvoiceForm
+            customers={customers}
+            allInvoices={invoices}
+            onSave={(data) => {
+              saveData("invoice", data);
+              handleSetView("invoices");
+            }}
+            onCancel={() => handleSetView("invoices")}
+            existingInvoice={editingInvoice}
+          />
+        );
+      case "customers":
+        return (
+          <CustomerListView
+            customers={customers}
+            onEdit={(c) => {
+              setEditingCustomer(c);
+              setCurrentView("customerForm");
+            }}
+            onDelete={deleteData}
+          />
+        );
+      case "customerForm":
+        return (
+          <CustomerForm
+            onSave={(data) => {
+              saveData("customer", data);
+              handleSetView("customers");
+            }}
+            onCancel={() => handleSetView("customers")}
+            existingCustomer={editingCustomer}
+          />
+        );
+      case "reports":
+        return <ReportsView invoices={invoices} xlsxReady={xlsxReady} />;
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <div className="flex h-screen bg-gray-50 text-gray-800">
+      <Sidebar currentView={currentView} setView={handleSetView} />
+      <main className="flex-1 p-4 sm:p-6 md:p-8 overflow-y-auto">
+        <Header currentView={currentView} setView={handleSetView} />
+        {renderView()}
+      </main>
+    </div>
+  );
+}
+
+/* ------------------------------ Layout ------------------------------ */
 const Sidebar = ({ currentView, setView }) => {
-    const navItems = [
-        { id: 'dashboard', label: 'Dashboard', icon: ICONS.dashboard },
-        { id: 'invoices', label: 'Invoices', icon: ICONS.invoice },
-        { id: 'customers', label: 'Customers', icon: ICONS.customers },
-        { id: 'reports', label: 'Reports', icon: ICONS.reports },
-    ];
-
-    return (
-        <nav className="w-20 lg:w-64 bg-white shadow-lg flex flex-col">
-            <div className="flex items-center justify-center lg:justify-start p-4 lg:p-6 border-b">
-                <span className="text-2xl font-bold text-indigo-600">PEATS</span>
-            </div>
-            <ul className="flex-1 mt-6">
-                {navItems.map(item => (
-                    <li key={item.id} className="px-4 lg:px-6 mb-2">
-                        <button
-                            onClick={() => setView(item.id)}
-                            className={`flex items-center w-full p-3 rounded-lg transition-colors ${
-                                currentView === item.id
-                                    ? 'bg-indigo-600 text-white shadow-md'
-                                    : 'text-gray-600 hover:bg-indigo-50 hover:text-indigo-600'
-                            }`}
-                        >
-                            <Icon path={item.icon} className="w-6 h-6" />
-                            <span className="ml-4 hidden lg:block font-medium">{item.label}</span>
-                        </button>
-                    </li>
-                ))}
-            </ul>
-        </nav>
-    );
+  const nav = [
+    { id: "dashboard", label: "Dashboard", icon: ICONS.dashboard },
+    { id: "invoices", label: "Invoices", icon: ICONS.invoice },
+    { id: "customers", label: "Customers", icon: ICONS.customers },
+    { id: "reports", label: "Reports", icon: ICONS.reports },
+  ];
+  return (
+    <nav className="w-20 lg:w-64 bg-white shadow-lg flex flex-col">
+      <div className="flex items-center justify-center lg:justify-start p-4 border-b">
+        <span className="text-2xl font-extrabold text-indigo-600">PEATS</span>
+      </div>
+      <ul className="flex-1 mt-4">
+        {nav.map((n) => (
+          <li key={n.id} className="px-3 lg:px-5 mb-2">
+            <button
+              onClick={() => setView(n.id)}
+              className={`flex items-center w-full p-3 rounded-xl transition-colors ${
+                currentView === n.id
+                  ? "bg-indigo-600 text-white shadow-md"
+                  : "text-gray-700 hover:bg-indigo-50 hover:text-indigo-700"
+              }`}
+            >
+              <Icon path={n.icon} className="w-6 h-6" />
+              <span className="ml-4 hidden lg:block font-medium">{n.label}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      <div className="p-4 text-xs text-gray-400">v1.2</div>
+    </nav>
+  );
 };
 
 const Header = ({ currentView, setView }) => {
-    const getTitle = () => {
-        switch(currentView) {
-            case 'dashboard': return 'Dashboard';
-            case 'invoices': return 'Invoices';
-            case 'invoiceForm': return 'Create/Edit Invoice';
-            case 'customers': return 'Customers';
-            case 'customerForm': return 'Create/Edit Customer';
-            case 'reports': return 'Reports';
-            default: return 'Dashboard';
-        }
-    };
+  const title = {
+    dashboard: "Dashboard",
+    invoices: "Invoices",
+    invoiceForm: "Create / Edit Invoice",
+    customers: "Customers",
+    customerForm: "Create / Edit Customer",
+    reports: "Reports",
+  }[currentView];
 
-    const showAddButton = ['invoices', 'customers'].includes(currentView);
-    const handleAddClick = () => {
-        if (currentView === 'invoices') setView('invoiceForm');
-        if (currentView === 'customers') setView('customerForm');
-    };
-
-    return (
-        <div className="flex justify-between items-center mb-8">
-            <div>
-                <h1 className="text-3xl font-bold text-gray-800">{getTitle()}</h1>
-                <p className="text-gray-500">Your GST Invoicing and Management Hub</p>
-            </div>
-            {showAddButton && (
-                 <button onClick={handleAddClick} className="flex items-center bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition shadow">
-                    <Icon path={ICONS.add} className="w-5 h-5 mr-2" />
-                    Add New
-                </button>
-            )}
+  const showAdd = ["invoices", "customers"].includes(currentView);
+  return (
+    <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between mb-6 gap-3">
+      <div>
+        <h1 className="text-2xl sm:text-3xl font-bold">{title}</h1>
+        <p className="text-gray-500">Your GST Invoicing & Management Hub</p>
+      </div>
+      {showAdd && (
+        <div className="flex gap-3">
+          <button
+            onClick={() => setView(currentView === "invoices" ? "invoiceForm" : "customerForm")}
+            className="inline-flex items-center bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 shadow"
+          >
+            <Icon path={ICONS.add} className="w-5 h-5 mr-2" />
+            Add New
+          </button>
         </div>
-    );
+      )}
+    </div>
+  );
 };
 
+/* ------------------------------ Dashboard ------------------------------ */
+const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxReady }) => {
+  const fileRef = useRef(null);
 
-// --- View Components ---
-const DashboardView = ({ invoices, customers }) => {
-    const totalRevenue = invoices.reduce((sum, inv) => sum + (inv.amountPaid || 0), 0);
-    const outstanding = invoices.reduce((sum, inv) => sum + ((inv.totalAmount || 0) - (inv.amountPaid || 0)), 0);
+  const totals = useMemo(() => {
+    const totalRevenue = sum(invoices, "totalAmount");
+    const outstanding = invoices
+      .filter((inv) => inv.status === "pending")
+      .reduce((acc, inv) => acc + safeNum(inv.totalAmount), 0);
+    return { totalRevenue, outstanding };
+  }, [invoices]);
 
-    return (
-        <div>
-            <div className="bg-white p-6 rounded-lg shadow-md mb-8">
-                <h2 className="text-xl font-semibold mb-4 text-gray-700">Welcome Back!</h2>
-                <p className="text-gray-600 mb-4">
-                    Your data is saved automatically in your browser. You can export a backup from the 'Reports' page.
-                </p>
-            </div>
+  const importExcel = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        if (typeof XLSX === "undefined") {
+          alert("Excel library not loaded yet. Please try again.");
+          return;
+        }
+        const data = new Uint8Array(ev.target.result);
+        const workbook = XLSX.read(data, { type: "array" });
+        const ws = workbook.Sheets[workbook.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(ws);
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-                <StatCard title="Total Invoices" value={invoices.length} />
-                <StatCard title="Total Customers" value={customers.length} />
-                <StatCard title="Total Revenue (Paid)" value={`₹${totalRevenue.toFixed(2)}`} />
-                <StatCard title="Outstanding Amount" value={`₹${outstanding.toFixed(2)}`} />
-            </div>
+        const importedInvoices = {};
+        const importedCustomers = {};
+
+        rows.forEach((row) => {
+          const invoiceId = row["Invoice ID"] || row["invoice_id"] || row["id"];
+          if (!invoiceId) return;
+          if (!importedInvoices[invoiceId]) {
+            importedInvoices[invoiceId] = {
+              id: String(invoiceId),
+              invoiceNumber: row["Invoice #"] ?? row["invoice_number"] ?? "",
+              invoiceDate: row["Invoice Date"] ?? row["invoice_date"] ?? "",
+              dueDate: row["Due Date"] ?? row["due_date"] ?? "",
+              customerId: row["Customer ID"] ?? row["customer_id"] ?? "",
+              customerName: row["Customer Name"] ?? row["customer_name"] ?? "",
+              customerAddress: row["Customer Address"] ?? row["customer_address"] ?? "",
+              customerGstin: row["Customer GSTIN"] ?? row["customer_gstin"] ?? "",
+              status: (row["Invoice Status"] ?? row["status"] ?? "pending").toLowerCase(),
+              totalAmount: safeNum(row["Invoice Total"] ?? row["invoice_total"] ?? 0),
+              items: [],
+            };
+          }
+          const cgst = safeNum(row["CGST Rate (%)"] ?? row["cgst"] ?? 0);
+          const sgst = safeNum(row["SGST Rate (%)"] ?? row["sgst"] ?? 0);
+          const igst = safeNum(row["IGST Rate (%)"] ?? row["igst"] ?? 0);
+          const mode = igst > 0 ? "igst" : "cgst_sgst";
+          const gstRate = igst > 0 ? igst : cgst + sgst;
+          importedInvoices[invoiceId].items.push({
+            description: row["Item Description"] ?? row["description"] ?? "",
+            hsn: row["HSN/SAC"] ?? row["hsn"] ?? "",
+            quantity: safeNum(row["Quantity"] ?? row["qty"] ?? 0),
+            rate: safeNum(row["Rate"] ?? 0),
+            cgst, sgst, igst,
+            gstMode: mode,
+            gstRate: gstRate,
+            total: safeNum(row["Total Item Value"] ?? row["line_total"] ?? 0),
+          });
+
+          const customerId = row["Customer ID"] ?? row["customer_id"];
+          if (customerId && !importedCustomers[customerId]) {
+            importedCustomers[customerId] = {
+              id: String(customerId),
+              name: row["Customer Name"] ?? "",
+              address: row["Customer Address"] ?? "",
+              gstin: row["Customer GSTIN"] ?? "",
+              email: row["Customer Email"] ?? row["email"] ?? "",
+              phone: row["Customer Phone"] ?? row["phone"] ?? "",
+            };
+          }
+        });
+
+        setInvoices(Object.values(importedInvoices));
+        setCustomers(Object.values(importedCustomers));
+        alert("Data imported successfully!");
+      } catch (err) {
+        console.error(err);
+        alert("Failed to import. Please verify file format.");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+    e.target.value = null;
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-white p-5 rounded-xl shadow">
+        <h2 className="text-lg font-semibold mb-1">Manage Your Data</h2>
+        <p className="text-sm text-gray-600 mb-4">
+          Data autosaves in your browser. You can import/export Excel or JSON backups anytime.
+        </p>
+        <div className="flex flex-wrap gap-3">
+          <button
+            disabled={!xlsxReady}
+            onClick={() => fileRef.current?.click()}
+            className={`inline-flex items-center px-4 py-2 rounded-lg shadow ${
+              xlsxReady
+                ? "bg-blue-600 text-white hover:bg-blue-700"
+                : "bg-gray-200 text-gray-500 cursor-not-allowed"
+            }`}
+          >
+            <Icon path={ICONS.upload} className="w-5 h-5 mr-2" /> Import from Excel
+          </button>
+          <input type="file" ref={fileRef} onChange={importExcel} className="hidden" accept=".xlsx,.xls" />
+          <ExportExcelButton invoices={invoices} disabled={!xlsxReady} />
+          <ExportJsonButton invoices={invoices} customers={customers} />
+          <ClearDataButton setInvoices={setInvoices} setCustomers={setCustomers} />
         </div>
-    );
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <StatCard title="Total Invoices" value={invoices.length} />
+        <StatCard title="Total Customers" value={customers.length} />
+        <StatCard title="Total Revenue" value={fmtInr(sum(invoices, "totalAmount"))} />
+        <StatCard title="Outstanding" value={fmtInr(totals.outstanding)} />
+      </div>
+    </div>
+  );
 };
 
 const StatCard = ({ title, value }) => (
-    <div className="bg-white p-6 rounded-lg shadow-md flex flex-col justify-between">
-        <h3 className="text-gray-500 font-medium">{title}</h3>
-        <p className="text-3xl font-bold text-gray-800 mt-2">{value}</p>
-    </div>
+  <div className="bg-white p-5 rounded-xl shadow flex flex-col gap-1">
+    <div className="text-gray-500 text-sm">{title}</div>
+    <div className="text-2xl font-bold">{value}</div>
+  </div>
 );
 
-const InvoiceListView = ({ invoices, onEdit, onDelete }) => {
-    const getStatus = (invoice) => {
-        const amountPaid = invoice.amountPaid || 0;
-        const totalAmount = invoice.totalAmount || 0;
-        if (amountPaid >= totalAmount) {
-            return { text: 'Paid', color: 'green' };
-        }
-        if (amountPaid > 0) {
-            return { text: 'Partially Paid', color: 'blue' };
-        }
-        return { text: 'Pending', color: 'yellow' };
-    };
-
-    const handleDelete = (id) => {
-        if (window.confirm("Are you sure you want to delete this invoice? This cannot be undone.")) {
-            onDelete('invoice', id);
-        }
-    };
-
-    const handlePrint = (invoice) => {
-        const printWindow = window.open('', '_blank');
-        printWindow.document.write(generatePrintableInvoice(invoice));
-        printWindow.document.close();
-        printWindow.focus();
-        setTimeout(() => { printWindow.print(); }, 500);
-    };
-
-    return (
-        <div className="bg-white p-6 rounded-lg shadow-md">
-            <div className="overflow-x-auto">
-                <table className="w-full text-left">
-                    <thead>
-                        <tr className="bg-gray-50 border-b">
-                            <th className="p-3">Invoice #</th>
-                            <th className="p-3">Customer</th>
-                            <th className="p-3">Date</th>
-                            <th className="p-3">Amount</th>
-                            <th className="p-3">Status</th>
-                            <th className="p-3">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {invoices.map(invoice => {
-                            const status = getStatus(invoice);
-                            const colorClasses = {
-                                green: 'bg-green-100 text-green-800',
-                                blue: 'bg-blue-100 text-blue-800',
-                                yellow: 'bg-yellow-100 text-yellow-800',
-                            };
-                            return (
-                                <tr key={invoice.id} className="border-b hover:bg-gray-50">
-                                    <td className="p-3 font-medium text-gray-700">{invoice.invoiceNumber}</td>
-                                    <td className="p-3">{invoice.customerName}</td>
-                                    <td className="p-3">{invoice.invoiceDate}</td>
-                                    <td className="p-3">₹{invoice.totalAmount?.toFixed(2)}</td>
-                                    <td className="p-3">
-                                        <span className={`px-2 py-1 text-xs font-semibold rounded-full ${colorClasses[status.color]}`}>
-                                            {status.text}
-                                        </span>
-                                    </td>
-                                    <td className="p-3 flex items-center space-x-2">
-                                        <button onClick={() => onEdit(invoice)} className="text-blue-500 hover:text-blue-700 p-1 rounded-full hover:bg-blue-100"><Icon path={ICONS.edit} className="w-5 h-5" /></button>
-                                        <button onClick={() => handleDelete(invoice.id)} className="text-red-500 hover:text-red-700 p-1 rounded-full hover:bg-red-100"><Icon path={ICONS.delete} className="w-5 h-5" /></button>
-                                        <button onClick={() => handlePrint(invoice)} className="text-gray-500 hover:text-gray-700 p-1 rounded-full hover:bg-gray-100"><Icon path={ICONS.print} className="w-5 h-5" /></button>
-                                    </td>
-                                </tr>
-                            );
-                        })}
-                    </tbody>
-                </table>
-            </div>
-        </div>
+const ExportExcelButton = ({ invoices, disabled }) => {
+  const exportToExcel = () => {
+    if (typeof XLSX === "undefined") {
+      alert("Excel library is loading. Try again.");
+      return;
+    }
+    const rows = invoices.flatMap((invoice) =>
+      (invoice.items || []).map((item) => {
+        const { taxable, cgstAmt, sgstAmt, igstAmt } = calcItem(item);
+        return {
+          "Invoice ID": invoice.id,
+          "Invoice #": invoice.invoiceNumber,
+          "Invoice Date": invoice.invoiceDate,
+          "Due Date": invoice.dueDate,
+          "Customer ID": invoice.customerId,
+          "Customer Name": invoice.customerName,
+          "Customer Address": invoice.customerAddress,
+          "Customer GSTIN": invoice.customerGstin,
+          "Item Description": item.description,
+          "HSN/SAC": item.hsn,
+          Quantity: item.quantity,
+          Rate: item.rate,
+          "GST Mode": item.gstMode || (safeNum(item.igst) > 0 ? "igst" : "cgst_sgst"),
+          "GST %": item.gstRate ?? (safeNum(item.igst) > 0 ? safeNum(item.igst) : safeNum(item.cgst) + safeNum(item.sgst)),
+          "Taxable Value": taxable,
+          "CGST Rate (%)": item.cgst,
+          "CGST Amount": cgstAmt,
+          "SGST Rate (%)": item.sgst,
+          "SGST Amount": sgstAmt,
+          "IGST Rate (%)": item.igst,
+          "IGST Amount": igstAmt,
+          "Total Item Value": round2(item.total),
+          "Invoice Total": round2(invoice.totalAmount),
+          "Invoice Status": invoice.status,
+        };
+      })
     );
+
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Invoices");
+
+    const buf = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+    const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;charset=UTF-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "PEATS_Master_Invoice_Data.xlsx";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 0);
+  };
+
+  return (
+    <button
+      disabled={disabled}
+      onClick={exportToExcel}
+      className={`inline-flex items-center px-4 py-2 rounded-lg shadow ${
+        disabled ? "bg-gray-200 text-gray-500 cursor-not-allowed" : "bg-green-600 text-white hover:bg-green-700"
+      }`}
+    >
+      <Icon path={ICONS.download} className="w-5 h-5 mr-2" /> Export Excel
+    </button>
+  );
 };
 
+const ExportJsonButton = ({ invoices, customers }) => {
+  const onClick = () => {
+    const payload = { schema: "peats-v1", exportedAt: new Date().toISOString(), invoices, customers };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "peats_backup.json";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 0);
+  };
+  return (
+    <button onClick={onClick} className="inline-flex items-center px-4 py-2 rounded-lg shadow bg-gray-800 text-white hover:bg-black">
+      <Icon path={ICONS.download} className="w-5 h-5 mr-2" /> Backup JSON
+    </button>
+  );
+};
+
+const ClearDataButton = ({ setInvoices, setCustomers }) => {
+  const clearAll = () => {
+    if (!window.confirm("This will clear all local data (invoices & customers). Continue?")) return;
+    setInvoices([]);
+    setCustomers([]);
+    localStorage.removeItem(LS_KEYS.invoices);
+    localStorage.removeItem(LS_KEYS.customers);
+  };
+  return (
+    <button onClick={clearAll} className="inline-flex items-center px-4 py-2 rounded-lg shadow bg-red-50 text-red-700 hover:bg-red-100">
+      <Icon path={ICONS.delete} className="w-5 h-5 mr-2" /> Clear Local Data
+    </button>
+  );
+};
+/* ------------------------------ Invoices List ------------------------------ */
+const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate }) => {
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState("all");
+  const [sortKey, setSortKey] = useState("invoiceDate");
+  const [sortDir, setSortDir] = useState("desc");
+  const [page, setPage] = useState(1);
+  const pageSize = 10;
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return invoices
+      .filter((i) => (status === "all" ? true : i.status === status))
+      .filter((i) =>
+        !q
+          ? true
+          : [i.invoiceNumber, i.customerName, i.invoiceDate, i.dueDate]
+              .filter(Boolean)
+              .some((v) => String(v).toLowerCase().includes(q))
+      )
+      .sort((a, b) => cmp(a, b, sortKey, sortDir));
+  }, [invoices, query, status, sortKey, sortDir]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const pageData = filtered.slice((page - 1) * pageSize, page * pageSize);
+  useEffect(() => setPage(1), [query, status]);
+
+  const handleDelete = (id) => {
+    if (window.confirm("Delete this invoice? This cannot be undone.")) onDelete("invoice", id);
+  };
+
+  const handlePrint = (inv) => {
+    const win = window.open("", "_blank");
+    win.document.write(generatePrintableInvoice(inv));
+    win.document.close();
+    win.focus();
+    setTimeout(() => win.print(), 400);
+  };
+
+  const toggleSort = (key) => {
+    if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
+  };
+
+  const th = (label, key, width) => (
+    <th
+      className={`p-3 ${width ?? ""} cursor-pointer select-none whitespace-nowrap`}
+      onClick={() => toggleSort(key)}
+      title="Sort"
+    >
+      <div className="inline-flex items-center gap-1">
+        {label}
+        <span className="text-xs text-gray-400">{sortKey === key ? (sortDir === "asc" ? "▲" : "▼") : ""}</span>
+      </div>
+    </th>
+  );
+
+  return (
+    <div className="bg-white p-5 rounded-xl shadow">
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
+        <div className="flex items-center gap-2">
+          <div className="relative">
+            <span className="absolute left-3 top-2.5 text-gray-400">
+              <Icon path={ICONS.search} />
+            </span>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search invoice #, customer, date..."
+              className="pl-9 pr-3 py-2 border rounded-lg w-72 max-w-full"
+            />
+          </div>
+          <select value={status} onChange={(e) => setStatus(e.target.value)} className="border rounded-lg px-3 py-2">
+            <option value="all">All</option>
+            <option value="pending">Pending</option>
+            <option value="paid">Paid</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-sm">
+          <thead>
+            <tr className="bg-gray-50 border-b text-gray-600">
+              {th("Invoice #", "invoiceNumber")}
+              {th("Customer", "customerName")}
+              {th("Date", "invoiceDate")}
+              {th("Amount", "totalAmount")}
+              {th("Status", "status")}
+              <th className="p-3">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pageData.map((inv) => (
+              <tr key={inv.id} className="border-b hover:bg-gray-50">
+                <td className="p-3 font-medium">{inv.invoiceNumber || "—"}</td>
+                <td className="p-3">{inv.customerName || "—"}</td>
+                <td className="p-3">{inv.invoiceDate || "—"}</td>
+                <td className="p-3">{fmtInr(safeNum(inv.totalAmount))}</td>
+                <td className="p-3">
+                  <span
+                    className={`px-2 py-1 text-xs font-semibold rounded-full ${
+                      inv.status === "paid"
+                        ? "bg-green-100 text-green-800"
+                        : "bg-amber-100 text-amber-800"
+                    }`}
+                  >
+                    {inv.status}
+                  </span>
+                </td>
+                <td className="p-3">
+                  <div className="flex items-center gap-1">
+                    <IconBtn title="Edit" onClick={() => onEdit(inv)} icon={ICONS.edit} className="text-blue-600 hover:bg-blue-50" />
+                    <IconBtn title="Duplicate" onClick={() => onDuplicate(inv)} icon={ICONS.duplicate} className="text-purple-600 hover:bg-purple-50" />
+                    <IconBtn title="Delete" onClick={() => handleDelete(inv.id)} icon={ICONS.delete} className="text-red-600 hover:bg-red-50" />
+                    <IconBtn title="Print" onClick={() => handlePrint(inv)} icon={ICONS.print} className="text-gray-700 hover:bg-gray-100" />
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {pageData.length === 0 && (
+              <tr>
+                <td colSpan={6} className="p-6 text-center text-gray-500">
+                  No invoices match your filters.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
+    </div>
+  );
+};
+
+const Pagination = ({ page, totalPages, onPageChange }) => (
+  <div className="flex items-center justify-end gap-2 mt-4">
+    <button
+      onClick={() => onPageChange(Math.max(1, page - 1))}
+      className="px-3 py-1 border rounded-lg disabled:opacity-50"
+      disabled={page === 1}
+    >
+      Prev
+    </button>
+    <span className="text-sm text-gray-600">
+      Page <strong>{page}</strong> of <strong>{totalPages}</strong>
+    </span>
+    <button
+      onClick={() => onPageChange(Math.min(totalPages, page + 1))}
+      className="px-3 py-1 border rounded-lg disabled:opacity-50"
+      disabled={page === totalPages}
+    >
+      Next
+    </button>
+  </div>
+);
+
+const IconBtn = ({ onClick, icon, title, className = "" }) => (
+  <button title={title} onClick={onClick} className={`p-2 rounded-lg transition-colors ${className}`}>
+    <Icon path={icon} />
+  </button>
+);
+
+/* ------------------------------ Customers ------------------------------ */
 const CustomerListView = ({ customers, onEdit, onDelete }) => {
-    const handleDelete = (id) => {
-        if (window.confirm("Are you sure you want to delete this customer? This cannot be undone.")) {
-            onDelete('customer', id);
-        }
-    };
+  const [query, setQuery] = useState("");
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return !q
+      ? customers
+      : customers.filter((c) =>
+          [c.name, c.email, c.phone].filter(Boolean).some((v) => String(v).toLowerCase().includes(q))
+        );
+  }, [customers, query]);
 
-    return (
-        <div className="bg-white p-6 rounded-lg shadow-md">
-            <div className="overflow-x-auto">
-                <table className="w-full text-left">
-                    <thead>
-                        <tr className="bg-gray-50 border-b">
-                            <th className="p-3">Name</th>
-                            <th className="p-3">Company</th>
-                            <th className="p-3">Email</th>
-                            <th className="p-3">Phone</th>
-                            <th className="p-3">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {customers.map(customer => (
-                            <tr key={customer.id} className="border-b hover:bg-gray-50">
-                                <td className="p-3 font-medium text-gray-700">{customer.name}</td>
-                                <td className="p-3">{customer.companyName}</td>
-                                <td className="p-3">{customer.email}</td>
-                                <td className="p-3">{customer.phone}</td>
-                                <td className="p-3 flex items-center space-x-2">
-                                    <button onClick={() => onEdit(customer)} className="text-blue-500 hover:text-blue-700 p-1 rounded-full hover:bg-blue-100"><Icon path={ICONS.edit} className="w-5 h-5" /></button>
-                                    <button onClick={() => handleDelete(customer.id)} className="text-red-500 hover:text-red-700 p-1 rounded-full hover:bg-red-100"><Icon path={ICONS.delete} className="w-5 h-5" /></button>
-                                </td>
-                            </tr>
-                        ))}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    );
+  const handleDelete = (id) => {
+    if (window.confirm("Delete this customer? This cannot be undone.")) onDelete("customer", id);
+  };
+
+  return (
+    <div className="bg-white p-5 rounded-xl shadow">
+      <div className="mb-4">
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search customers..."
+          className="px-3 py-2 border rounded-lg w-72 max-w-full"
+        />
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-sm">
+          <thead>
+            <tr className="bg-gray-50 border-b text-gray-600">
+              <th className="p-3">Name</th>
+              <th className="p-3">Email</th>
+              <th className="p-3">Phone</th>
+              <th className="p-3">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((c) => (
+              <tr key={c.id} className="border-b hover:bg-gray-50">
+                <td className="p-3 font-medium">{c.name}</td>
+                <td className="p-3">{c.email || "—"}</td>
+                <td className="p-3">{c.phone || "—"}</td>
+                <td className="p-3">
+                  <div className="flex items-center gap-1">
+                    <IconBtn title="Edit" onClick={() => onEdit(c)} icon={ICONS.edit} className="text-blue-600 hover:bg-blue-50" />
+                    <IconBtn title="Delete" onClick={() => handleDelete(c.id)} icon={ICONS.delete} className="text-red-600 hover:bg-red-50" />
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {filtered.length === 0 && (
+              <tr>
+                <td colSpan={4} className="p-6 text-center text-gray-500">No customers found.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 };
 
-const ReportsView = ({ invoices, customers, isXlsxLoaded }) => {
-    const exportToExcel = () => {
-        if (!isXlsxLoaded) {
-            console.error('Excel library (XLSX) is not loaded yet.');
-            alert('Excel library is loading. Please try again in a moment.');
-            return;
-        }
-
-        try {
-            const worksheetData = invoices.flatMap(invoice => 
-                (invoice.items || []).map(item => ({
-                    'Invoice ID': invoice.id,
-                    'Invoice #': invoice.invoiceNumber,
-                    'Invoice Date': invoice.invoiceDate,
-                    'Due Date': invoice.dueDate,
-                    'Customer ID': invoice.customerId,
-                    'Customer Name': invoice.customerName,
-                    'Customer Address': invoice.customerAddress,
-                    'Customer GSTIN': invoice.customerGstin,
-                    'Item Description': item.description,
-                    'HSN/SAC': item.hsn,
-                    'Quantity': item.quantity,
-                    'Rate': item.rate,
-                    'Taxable Value': item.quantity * item.rate,
-                    'CGST Rate (%)': item.cgst,
-                    'CGST Amount': (item.quantity * item.rate * item.cgst) / 100,
-                    'SGST Rate (%)': item.sgst,
-                    'SGST Amount': (item.quantity * item.rate * item.sgst) / 100,
-                    'IGST Rate (%)': item.igst,
-                    'IGST Amount': (item.quantity * item.rate * item.igst) / 100,
-                    'Total Item Value': item.total,
-                    'Freight Charges': invoice.freightCharges || 0,
-                    'Invoice Total': invoice.totalAmount,
-                    'Amount Paid': invoice.amountPaid || 0,
-                    'Remaining Amount': (invoice.totalAmount || 0) - (invoice.amountPaid || 0),
-                }))
-            );
-
-            const worksheet = XLSX.utils.json_to_sheet(worksheetData);
-            const workbook = XLSX.utils.book_new();
-            XLSX.utils.book_append_sheet(workbook, worksheet, "Invoices");
-            const excelBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
-            const data = new Blob([excelBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;charset=UTF-8' });
-            
-            const url = URL.createObjectURL(data);
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = 'PEATS_Master_Invoice_Data.xlsx';
-            document.body.appendChild(link);
-            link.click();
-            
-            setTimeout(() => {
-                document.body.removeChild(link);
-                window.URL.revokeObjectURL(url);
-            }, 100);
-
-        } catch (error) {
-            console.error("Error exporting to Excel:", error);
-            alert("An error occurred while creating the Excel file.");
-        }
-    };
-
-    const handleSendReminder = (invoice, customer, remainingAmount, dueDays) => {
-        const subject = `Payment Reminder for Invoice #${invoice.invoiceNumber}`;
-        const body = `
-Dear ${customer.name},
-
-This is a friendly reminder regarding invoice #${invoice.invoiceNumber}, which was due ${dueDays} days ago.
-
-The remaining amount to be paid is ₹${remainingAmount.toFixed(2)}.
-
-We would appreciate it if you could look into this at your earliest convenience. Please let us know if you have any questions.
-
-Thank you for your business.
-
-Best regards,
-ParthaSarthi Engineering and Training Services
-        `;
-        const mailtoLink = `mailto:${customer.email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body.trim())}`;
-        window.location.href = mailtoLink;
-    };
-
-    return (
-        <div className="bg-white p-6 rounded-lg shadow-md">
-            <div className="flex justify-between items-center mb-6">
-                <h2 className="text-xl font-semibold text-gray-700">Financial Reports</h2>
-                <button 
-                    onClick={exportToExcel} 
-                    disabled={!isXlsxLoaded}
-                    className={`flex items-center px-4 py-2 rounded-lg transition text-white ${!isXlsxLoaded ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-500 hover:bg-green-600'}`}
-                >
-                    <Icon path={ICONS.download} className="w-5 h-5 mr-2" />
-                    {isXlsxLoaded ? 'Export Master Excel' : 'Loading...'}
-                </button>
-            </div>
-            
-            <h3 className="text-lg font-semibold text-gray-600 mb-4">Outstanding Invoices</h3>
-            <div className="overflow-x-auto">
-                <table className="w-full text-left">
-                    <thead>
-                        <tr className="bg-gray-50 border-b">
-                            <th className="p-3">Invoice #</th>
-                            <th className="p-3">Customer</th>
-                            <th className="p-3">Amount Received</th>
-                            <th className="p-3">Remaining Amount</th>
-                            <th className="p-3">Due Since (Days)</th>
-                            <th className="p-3">Action</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {invoices.filter(inv => (inv.totalAmount || 0) > (inv.amountPaid || 0)).map(invoice => {
-                            const remainingAmount = (invoice.totalAmount || 0) - (invoice.amountPaid || 0);
-                            const dueDate = new Date(invoice.dueDate);
-                            const today = new Date();
-                            const dueDays = Math.floor((today - dueDate) / (1000 * 60 * 60 * 24));
-                            const customer = customers.find(c => c.id === invoice.customerId);
-
-                            return (
-                                <tr key={invoice.id} className="border-b hover:bg-gray-50">
-                                    <td className="p-3">{invoice.invoiceNumber}</td>
-                                    <td className="p-3">{invoice.customerName}</td>
-                                    <td className="p-3">₹{(invoice.amountPaid || 0).toFixed(2)}</td>
-                                    <td className="p-3 font-bold">₹{remainingAmount.toFixed(2)}</td>
-                                    <td className={`p-3 ${dueDays > 0 ? 'text-red-600 font-semibold' : ''}`}>{dueDays > 0 ? dueDays : 'N/A'}</td>
-                                    <td className="p-3">
-                                        {customer && customer.email && dueDays > 0 && (
-                                            <button 
-                                                onClick={() => handleSendReminder(invoice, customer, remainingAmount, dueDays)}
-                                                className="flex items-center text-sm bg-blue-500 text-white px-3 py-1 rounded-lg hover:bg-blue-600 transition">
-                                                <Icon path={ICONS.email} className="w-4 h-4 mr-2" />
-                                                Send Reminder
-                                            </button>
-                                        )}
-                                    </td>
-                                </tr>
-                            );
-                        })}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    );
-};
-
-// --- Form Components ---
-const InvoiceForm = ({ customers, onSave, onCancel, existingInvoice, getNextInvoiceNumber }) => {
-    const [invoiceData, setInvoiceData] = useState({
-        id: existingInvoice?.id || null,
-        invoiceNumber: existingInvoice?.invoiceNumber || getNextInvoiceNumber(),
-        invoiceDate: existingInvoice?.invoiceDate || new Date().toISOString().split('T')[0],
-        dueDate: existingInvoice?.dueDate || '',
-        customerId: existingInvoice?.customerId || '',
-        customerName: existingInvoice?.customerName || '',
-        customerAddress: existingInvoice?.customerAddress || '',
-        customerGstin: existingInvoice?.customerGstin || '',
-        items: existingInvoice?.items || [{ description: '', hsn: '', quantity: 1, rate: 0, gstType: 'cgst_sgst', cgst: 0, sgst: 0, igst: 0, total: 0 }],
-        freightCharges: existingInvoice?.freightCharges || 0,
-        amountPaid: existingInvoice?.amountPaid || 0,
+/* ------------------------------ Reports ------------------------------ */
+const ReportsView = ({ invoices, xlsxReady }) => {
+  const monthly = useMemo(() => {
+    const map = new Map();
+    invoices.forEach((inv) => {
+      const m = new Date(inv.invoiceDate);
+      if (isNaN(m)) return;
+      const key = m.toLocaleString("en-IN", { month: "long", year: "numeric" });
+      if (!map.has(key)) map.set(key, { total: 0, count: 0 });
+      map.get(key).total += safeNum(inv.totalAmount);
+      map.get(key).count += 1;
     });
+    return Array.from(map.entries()).sort((a, b) => new Date(a[0]) - new Date(b[0]));
+  }, [invoices]);
 
-    const handleCustomerSelect = (e) => {
-        const selectedCustomer = customers.find(c => c.id === e.target.value);
-        if (selectedCustomer) {
-            setInvoiceData({
-                ...invoiceData,
-                customerId: selectedCustomer.id,
-                customerName: selectedCustomer.name,
-                customerAddress: selectedCustomer.address,
-                customerGstin: selectedCustomer.gstin,
-            });
-        }
+  const gstTotals = useMemo(() => {
+    const allItems = invoices.flatMap((i) => i.items || []);
+    const cgst = sum(allItems.map((it) => calcItem(it)), "cgstAmt");
+    const sgst = sum(allItems.map((it) => calcItem(it)), "sgstAmt");
+    const igst = sum(allItems.map((it) => calcItem(it)), "igstAmt");
+    return { cgst: round2(cgst), sgst: round2(sgst), igst: round2(igst) };
+  }, [invoices]);
+
+  return (
+    <div className="bg-white p-5 rounded-xl shadow space-y-6">
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold">GST & Sales Reports</h2>
+        <ExportExcelButton invoices={invoices} disabled={!xlsxReady} />
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <StatCard title="Total CGST" value={fmtInr(gstTotals.cgst)} />
+        <StatCard title="Total SGST" value={fmtInr(gstTotals.sgst)} />
+        <StatCard title="Total IGST" value={fmtInr(gstTotals.igst)} />
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-sm">
+          <thead>
+            <tr className="bg-gray-50 border-b text-gray-600">
+              <th className="p-3">Month</th>
+              <th className="p-3">Invoices Issued</th>
+              <th className="p-3">Total Sales</th>
+            </tr>
+          </thead>
+          <tbody>
+            {monthly.map(([month, data]) => (
+              <tr key={month} className="border-b hover:bg-gray-50">
+                <td className="p-3">{month}</td>
+                <td className="p-3">{data.count}</td>
+                <td className="p-3">{fmtInr(round2(data.total))}</td>
+              </tr>
+            ))}
+            {monthly.length === 0 && (
+              <tr>
+                <td colSpan={3} className="p-6 text-center text-gray-500">No data yet.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+/* ------------------------------ Forms ------------------------------ */
+const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice }) => {
+  const todayISO = new Date().toISOString().split("T")[0];
+  const [touchedNumber, setTouchedNumber] = useState(false);
+  const [invoice, setInvoice] = useState(() => {
+    const initDate = existingInvoice?.invoiceDate || todayISO;
+    const defaultNumber = existingInvoice?.invoiceNumber || nextInvoiceNumberForDate(initDate, allInvoices);
+    return {
+      id: existingInvoice?.id || null,
+      invoiceNumber: defaultNumber,
+      invoiceDate: initDate,
+      dueDate: existingInvoice?.dueDate || "",
+      customerId: existingInvoice?.customerId || "",
+      customerName: existingInvoice?.customerName || "",
+      customerAddress: existingInvoice?.customerAddress || "",
+      customerGstin: existingInvoice?.customerGstin || "",
+      items: existingInvoice?.items?.length
+        ? existingInvoice.items
+        : [
+            { description: "", hsn: "", quantity: 1, rate: 0, cgst: 0, sgst: 0, igst: 0, gstMode: "cgst_sgst", gstRate: 18, total: 0 },
+          ],
+      status: existingInvoice?.status || "pending",
     };
+  });
 
-    const handleItemChange = (index, field, value) => {
-        const newItems = [...invoiceData.items];
-        newItems[index][field] = value;
+  // Re-generate invoice number when date changes (only for new + not manually touched)
+  useEffect(() => {
+    if (existingInvoice?.id) return;
+    if (touchedNumber) return;
+    const next = nextInvoiceNumberForDate(invoice.invoiceDate, allInvoices);
+    setInvoice((prev) => ({ ...prev, invoiceNumber: next }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [invoice.invoiceDate, allInvoices]);
 
-        if(field === 'gstType') {
-            newItems[index].cgst = 0;
-            newItems[index].sgst = 0;
-            newItems[index].igst = 0;
-        }
-        
-        const item = newItems[index];
-        const taxableValue = (item.quantity || 0) * (item.rate || 0);
-        const cgstAmount = item.gstType === 'cgst_sgst' ? taxableValue * (item.cgst || 0) / 100 : 0;
-        const sgstAmount = item.gstType === 'cgst_sgst' ? taxableValue * (item.sgst || 0) / 100 : 0;
-        const igstAmount = item.gstType === 'igst' ? taxableValue * (item.igst || 0) / 100 : 0;
-        newItems[index].total = taxableValue + cgstAmount + sgstAmount + igstAmount;
-        
-        setInvoiceData({ ...invoiceData, items: newItems });
-    };
+  const subTotal = round2(sum(invoice.items.map(calcItem), "taxable"));
+  const totalTax = round2(
+    sum(invoice.items.map(calcItem), "cgstAmt") +
+      sum(invoice.items.map(calcItem), "sgstAmt") +
+      sum(invoice.items.map(calcItem), "igstAmt")
+  );
+  const totalAmount = round2(subTotal + totalTax);
 
-    const addItem = () => {
-        setInvoiceData({
-            ...invoiceData,
-            items: [...invoiceData.items, { description: '', hsn: '', quantity: 1, rate: 0, gstType: 'cgst_sgst', cgst: 0, sgst: 0, igst: 0, total: 0 }]
-        });
-    };
+  const onSelectCustomer = (e) => {
+    const c = customers.find((x) => x.id === e.target.value);
+    if (!c) return;
+    setInvoice((prev) => ({
+      ...prev,
+      customerId: c.id,
+      customerName: c.name || "",
+      customerAddress: c.address || "",
+      customerGstin: c.gstin || "",
+    }));
+  };
 
-    const removeItem = (index) => {
-        const newItems = invoiceData.items.filter((_, i) => i !== index);
-        setInvoiceData({ ...invoiceData, items: newItems });
-    };
+  const applyGstModeRate = (it) => {
+    const rate = safeNum(it.gstRate);
+    if ((it.gstMode || "cgst_sgst") === "igst") {
+      it.igst = round2(rate);
+      it.cgst = 0; it.sgst = 0;
+    } else {
+      it.cgst = round2(rate / 2);
+      it.sgst = round2(rate / 2);
+      it.igst = 0;
+    }
+    return it;
+  };
 
-    const handleSubmit = (e) => {
-        e.preventDefault();
-        const subTotal = invoiceData.items.reduce((sum, item) => sum + (item.quantity * item.rate), 0);
-        const totalTax = invoiceData.items.reduce((sum, item) => sum + (item.total - (item.quantity * item.rate)), 0);
-        const freight = parseFloat(invoiceData.freightCharges) || 0;
-        const totalAmount = subTotal + totalTax + freight;
-        onSave({ ...invoiceData, totalAmount });
-    };
-    
-    const subTotal = invoiceData.items.reduce((sum, item) => sum + (item.quantity * item.rate), 0);
-    const totalTax = invoiceData.items.reduce((sum, item) => sum + (item.total - (item.quantity * item.rate)), 0);
-    const freight = parseFloat(invoiceData.freightCharges) || 0;
-    const totalAmount = subTotal + totalTax + freight;
-    const amountPaid = parseFloat(invoiceData.amountPaid) || 0;
-    const amountDue = totalAmount - amountPaid;
+  const updateItem = (index, field, value) => {
+    setInvoice((prev) => {
+      const next = { ...prev };
+      const items = [...next.items];
+      let it = { ...items[index] };
 
-    return (
-        <form onSubmit={handleSubmit} className="bg-white p-8 rounded-lg shadow-md space-y-6">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                <InputField label="Invoice #" value={invoiceData.invoiceNumber} readOnly />
-                <InputField label="Invoice Date" type="date" value={invoiceData.invoiceDate} onChange={e => setInvoiceData({...invoiceData, invoiceDate: e.target.value})} required />
-                <InputField label="Due Date" type="date" value={invoiceData.dueDate} onChange={e => setInvoiceData({...invoiceData, dueDate: e.target.value})} />
-            </div>
-            <div className="border-t pt-6">
-                <h3 className="text-lg font-semibold text-gray-700 mb-4">Customer Information</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div className="flex flex-col">
-                        <label className="mb-1 font-medium text-gray-600">Select Customer</label>
-                        <select onChange={handleCustomerSelect} value={invoiceData.customerId} className="p-2 border rounded-md bg-white">
-                            <option value="">-- Select Existing Customer --</option>
-                            {customers.map(c => <option key={c.id} value={c.id}>{c.name} ({c.companyName})</option>)}
-                        </select>
-                    </div>
-                    <InputField label="Customer Name" value={invoiceData.customerName} onChange={e => setInvoiceData({...invoiceData, customerName: e.target.value})} required />
-                    <InputField label="Customer Address" value={invoiceData.customerAddress} onChange={e => setInvoiceData({...invoiceData, customerAddress: e.target.value})} />
-                    <InputField label="Customer GSTIN" value={invoiceData.customerGstin} onChange={e => setInvoiceData({...invoiceData, customerGstin: e.target.value})} />
-                </div>
-            </div>
-            <div className="border-t pt-6">
-                 <h3 className="text-lg font-semibold text-gray-700 mb-4">Invoice Items</h3>
-                 <div className="overflow-x-auto">
-                    <table className="w-full">
-                        <thead>
-                            <tr className="bg-gray-50">
-                                <th className="p-2 text-left text-sm font-semibold text-gray-600">Description</th>
-                                <th className="p-2 text-left text-sm font-semibold text-gray-600 w-24">HSN/SAC</th>
-                                <th className="p-2 text-left text-sm font-semibold text-gray-600 w-20">Qty</th>
-                                <th className="p-2 text-left text-sm font-semibold text-gray-600 w-28">Rate</th>
-                                <th className="p-2 text-left text-sm font-semibold text-gray-600 w-32">GST Type</th>
-                                <th className="p-2 text-left text-sm font-semibold text-gray-600 w-20">Tax (%)</th>
-                                <th className="p-2 text-right text-sm font-semibold text-gray-600 w-32">Total</th>
-                                <th className="p-2 w-12"></th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {invoiceData.items.map((item, index) => (
-                                <tr key={index}>
-                                    <td><input type="text" value={item.description} onChange={e => handleItemChange(index, 'description', e.target.value)} className="w-full p-2 border rounded-md" /></td>
-                                    <td><input type="text" value={item.hsn} onChange={e => handleItemChange(index, 'hsn', e.target.value)} className="w-full p-2 border rounded-md" /></td>
-                                    <td><input type="number" value={item.quantity} onChange={e => handleItemChange(index, 'quantity', parseFloat(e.target.value))} className="w-full p-2 border rounded-md" /></td>
-                                    <td><input type="number" value={item.rate} onChange={e => handleItemChange(index, 'rate', parseFloat(e.target.value))} className="w-full p-2 border rounded-md" /></td>
-                                    <td>
-                                        <select value={item.gstType} onChange={e => handleItemChange(index, 'gstType', e.target.value)} className="w-full p-2 border rounded-md bg-white">
-                                            <option value="cgst_sgst">CGST/SGST</option>
-                                            <option value="igst">IGST</option>
-                                        </select>
-                                    </td>
-                                    <td>
-                                        {item.gstType === 'cgst_sgst' ? (
-                                            <div className="flex space-x-1">
-                                                <input placeholder="CGST" type="number" value={item.cgst} onChange={e => handleItemChange(index, 'cgst', parseFloat(e.target.value))} className="w-1/2 p-2 border rounded-md" />
-                                                <input placeholder="SGST" type="number" value={item.sgst} onChange={e => handleItemChange(index, 'sgst', parseFloat(e.target.value))} className="w-1/2 p-2 border rounded-md" />
-                                            </div>
-                                        ) : (
-                                            <input placeholder="IGST" type="number" value={item.igst} onChange={e => handleItemChange(index, 'igst', parseFloat(e.target.value))} className="w-full p-2 border rounded-md" />
-                                        )}
-                                    </td>
-                                    <td className="p-2 text-right font-medium">₹{item.total.toFixed(2)}</td>
-                                    <td><button type="button" onClick={() => removeItem(index)} className="text-red-500 hover:text-red-700 p-2"><Icon path={ICONS.delete} className="w-5 h-5"/></button></td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                 </div>
-                <button type="button" onClick={addItem} className="mt-4 flex items-center text-indigo-600 font-semibold hover:text-indigo-800">
-                    <Icon path={ICONS.add} className="w-5 h-5 mr-2"/> Add Item
-                </button>
-            </div>
-            <div className="flex justify-end mt-6">
-                <div className="w-full md:w-1/2 space-y-2">
-                    <div className="flex justify-between items-center">
-                        <span className="text-gray-600">Freight Charges:</span>
-                        <input type="number" value={invoiceData.freightCharges} onChange={e => setInvoiceData({...invoiceData, freightCharges: e.target.value})} className="w-32 p-2 border rounded-md" />
-                    </div>
-                     <div className="flex justify-between"><span className="text-gray-600">Subtotal:</span> <span>₹{subTotal.toFixed(2)}</span></div>
-                    <div className="flex justify-between"><span className="text-gray-600">Total Tax:</span> <span>₹{totalTax.toFixed(2)}</span></div>
-                    <hr/>
-                    <div className="flex justify-between font-bold text-lg"><span className="text-gray-800">Total Amount:</span> <span>₹{totalAmount.toFixed(2)}</span></div>
-                    <div className="flex justify-between items-center">
-                        <span className="text-gray-600">Amount Paid:</span>
-                        <input type="number" value={invoiceData.amountPaid} onChange={e => setInvoiceData({...invoiceData, amountPaid: e.target.value})} className="w-32 p-2 border rounded-md" />
-                    </div>
-                    <div className="flex justify-between font-bold text-xl text-red-600"><span className="text-gray-800">Amount Due:</span> <span>₹{amountDue.toFixed(2)}</span></div>
+      if (field === "description" || field === "hsn") it[field] = value;
+      else it[field] = safeNum(value);
 
-                </div>
-            </div>
-            <div className="flex justify-end space-x-4 border-t pt-6">
-                <button type="button" onClick={onCancel} className="px-6 py-2 rounded-lg bg-gray-200 hover:bg-gray-300">Cancel</button>
-                <button type="submit" className="px-6 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 font-semibold">{existingInvoice ? 'Update Invoice' : 'Save Invoice'}</button>
-            </div>
-        </form>
-    );
+      if (field === "gstMode") it.gstMode = value;
+      if (field === "gstRate" || field === "gstMode") {
+        it.gstRate = field === "gstRate" ? safeNum(value) : (it.gstRate ?? 0);
+        it = applyGstModeRate(it);
+      }
+
+      if (["cgst", "sgst", "igst"].includes(field)) {
+        if (it.igst > 0) { it.gstMode = "igst"; it.gstRate = round2(it.igst); }
+        else { it.gstMode = "cgst_sgst"; it.gstRate = round2(safeNum(it.cgst) + safeNum(it.sgst)); }
+      }
+
+      const { total } = calcItem(it);
+      it.total = total;
+      items[index] = it;
+      next.items = items;
+      return next;
+    });
+  };
+
+  const addItem = () =>
+    setInvoice((prev) => ({
+      ...prev,
+      items: [
+        ...prev.items,
+        { description: "", hsn: "", quantity: 1, rate: 0, cgst: 0, sgst: 0, igst: 0, gstMode: "cgst_sgst", gstRate: 18, total: 0 },
+      ],
+    }));
+
+  const removeItem = (idx) =>
+    setInvoice((prev) => ({ ...prev, items: prev.items.filter((_, i) => i !== idx) }));
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (!invoice.invoiceNumber) return alert("Invoice # is required");
+    if (!invoice.customerName) return alert("Customer name is required");
+    if (invoice.customerGstin && !GSTIN_REGEX.test(invoice.customerGstin)) {
+      if (!window.confirm("GSTIN does not look valid. Save anyway?")) return;
+    }
+    onSave({ ...invoice, totalAmount });
+  };
+
+  return (
+    <form onSubmit={submit} className="bg-white p-6 rounded-xl shadow space-y-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div>
+          <label className="mb-1 block text-sm text-gray-600">Invoice #</label>
+          <input
+            value={invoice.invoiceNumber}
+            onChange={(e) => { setTouchedNumber(true); setInvoice({ ...invoice, invoiceNumber: e.target.value }); }}
+            className="p-2 border rounded-lg w-full"
+            required
+          />
+          <p className="text-xs text-gray-500 mt-1">Format: <code>PINV/YYYY/MM/DD980001</code></p>
+        </div>
+        <Input label="Invoice Date" type="date" value={invoice.invoiceDate} onChange={(e) => setInvoice({ ...invoice, invoiceDate: e.target.value })} required />
+        <Input label="Due Date" type="date" value={invoice.dueDate} onChange={(e) => setInvoice({ ...invoice, dueDate: e.target.value })} />
+      </div>
+
+      <div className="border-t pt-4">
+        <h3 className="text-lg font-semibold mb-3">Customer</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label className="mb-1 block text-sm text-gray-600">Select Customer</label>
+            <select value={invoice.customerId} onChange={onSelectCustomer} className="p-2 border rounded-lg w-full bg-white">
+              <option value="">— Select Existing —</option>
+              {customers.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          </div>
+          <Input label="Customer Name" value={invoice.customerName} onChange={(e) => setInvoice({ ...invoice, customerName: e.target.value })} required />
+          <Input label="Customer Address" value={invoice.customerAddress} onChange={(e) => setInvoice({ ...invoice, customerAddress: e.target.value })} />
+          <Input label="Customer GSTIN" value={invoice.customerGstin} onChange={(e) => setInvoice({ ...invoice, customerGstin: e.target.value.toUpperCase() })} />
+        </div>
+      </div>
+
+      <div className="border-t pt-4">
+        <h3 className="text-lg font-semibold mb-3">Invoice Items</h3>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm text-left border">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="p-2">Description</th>
+                <th className="p-2">HSN/SAC</th>
+                <th className="p-2">Qty</th>
+                <th className="p-2">Rate</th>
+                <th className="p-2">GST Mode</th>
+                <th className="p-2">GST %</th>
+                <th className="p-2">Total</th>
+                <th className="p-2">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {invoice.items.map((it, idx) => {
+                const { total } = calcItem(it);
+                return (
+                  <tr key={idx} className="border-t">
+                    <td className="p-2">
+                      <input
+                        value={it.description}
+                        onChange={(e) => updateItem(idx, "description", e.target.value)}
+                        className="p-1 border rounded w-40"
+                      />
+                    </td>
+                    <td className="p-2">
+                      <input
+                        value={it.hsn}
+                        onChange={(e) => updateItem(idx, "hsn", e.target.value)}
+                        className="p-1 border rounded w-24"
+                      />
+                    </td>
+                    <td className="p-2">
+                      <input
+                        type="number"
+                        value={it.quantity}
+                        onChange={(e) => updateItem(idx, "quantity", e.target.value)}
+                        className="p-1 border rounded w-16"
+                      />
+                    </td>
+                    <td className="p-2">
+                      <input
+                        type="number"
+                        value={it.rate}
+                        onChange={(e) => updateItem(idx, "rate", e.target.value)}
+                        className="p-1 border rounded w-20"
+                      />
+                    </td>
+                    <td className="p-2">
+                      <select
+                        value={it.gstMode}
+                        onChange={(e) => updateItem(idx, "gstMode", e.target.value)}
+                        className="p-1 border rounded"
+                      >
+                        <option value="cgst_sgst">CGST+SGST</option>
+                        <option value="igst">IGST</option>
+                      </select>
+                    </td>
+                    <td className="p-2">
+                      <select
+                        value={it.gstRate}
+                        onChange={(e) => updateItem(idx, "gstRate", e.target.value)}
+                        className="p-1 border rounded"
+                      >
+                        {GST_RATES.map((r) => (
+                          <option key={r} value={r}>{r}%</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="p-2">{fmtInr(total)}</td>
+                    <td className="p-2">
+                      <button type="button" onClick={() => removeItem(idx)} className="text-red-600">✕</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <button type="button" onClick={addItem} className="mt-2 px-3 py-1 bg-gray-200 rounded hover:bg-gray-300">+ Add Item</button>
+      </div>
+
+      <div className="border-t pt-4 space-y-2">
+        <div className="flex justify-between text-sm">
+          <span>Sub Total:</span><span>{fmtInr(subTotal)}</span>
+        </div>
+        <div className="flex justify-between text-sm">
+          <span>Total Tax:</span><span>{fmtInr(totalTax)}</span>
+        </div>
+        <div className="flex justify-between font-bold">
+          <span>Grand Total:</span><span>{fmtInr(totalAmount)}</span>
+        </div>
+      </div>
+
+      <div className="flex justify-end gap-3 pt-4">
+        <button type="button" onClick={onCancel} className="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Cancel</button>
+        <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700">Save Invoice</button>
+      </div>
+    </form>
+  );
 };
 
 const CustomerForm = ({ onSave, onCancel, existingCustomer }) => {
-    const [customerData, setCustomerData] = useState({
-        id: existingCustomer?.id || null,
-        name: existingCustomer?.name || '',
-        companyName: existingCustomer?.companyName || '',
-        email: existingCustomer?.email || '',
-        phone: existingCustomer?.phone || '',
-        address: existingCustomer?.address || '',
-        gstin: existingCustomer?.gstin || '',
-    });
-
-    const handleSubmit = (e) => {
-        e.preventDefault();
-        onSave(customerData);
-    };
-
-    return (
-        <form onSubmit={handleSubmit} className="bg-white p-8 rounded-lg shadow-md space-y-6 max-w-lg mx-auto">
-            <InputField label="Contact Person Name" value={customerData.name} onChange={e => setCustomerData({...customerData, name: e.target.value})} required />
-            <InputField label="Company Name" value={customerData.companyName} onChange={e => setCustomerData({...customerData, companyName: e.target.value})} />
-            <InputField label="Email" type="email" value={customerData.email} onChange={e => setCustomerData({...customerData, email: e.target.value})} />
-            <InputField label="Phone" value={customerData.phone} onChange={e => setCustomerData({...customerData, phone: e.target.value})} />
-            <InputField label="Address" value={customerData.address} onChange={e => setCustomerData({...customerData, address: e.target.value})} />
-            <InputField label="GSTIN" value={customerData.gstin} onChange={e => setCustomerData({...customerData, gstin: e.target.value})} />
-            <div className="flex justify-end space-x-4 pt-4">
-                <button type="button" onClick={onCancel} className="px-6 py-2 rounded-lg bg-gray-200 hover:bg-gray-300">Cancel</button>
-                <button type="submit" className="px-6 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 font-semibold">{existingCustomer ? 'Update Customer' : 'Save Customer'}</button>
-            </div>
-        </form>
-    );
+  const [c, setC] = useState(() => existingCustomer || { id: null, name: "", email: "", phone: "", address: "", gstin: "" });
+  const submit = (e) => {
+    e.preventDefault();
+    if (!c.name) return alert("Name is required");
+    if (c.gstin && !GSTIN_REGEX.test(c.gstin)) {
+      if (!window.confirm("GSTIN does not look valid. Save anyway?")) return;
+    }
+    onSave(c);
+  };
+  return (
+    <form onSubmit={submit} className="bg-white p-6 rounded-xl shadow space-y-4">
+      <Input label="Customer Name" value={c.name} onChange={(e) => setC({ ...c, name: e.target.value })} required />
+      <Input label="Email" value={c.email} onChange={(e) => setC({ ...c, email: e.target.value })} />
+      <Input label="Phone" value={c.phone} onChange={(e) => setC({ ...c, phone: e.target.value })} />
+      <Input label="Address" value={c.address} onChange={(e) => setC({ ...c, address: e.target.value })} />
+      <Input label="GSTIN" value={c.gstin} onChange={(e) => setC({ ...c, gstin: e.target.value.toUpperCase() })} />
+      <div className="flex justify-end gap-3">
+        <button type="button" onClick={onCancel} className="px-4 py-2 bg-gray-200 rounded">Cancel</button>
+        <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded">Save</button>
+      </div>
+    </form>
+  );
 };
 
-const InputField = ({ label, type = 'text', value, onChange, required = false, readOnly = false }) => (
-    <div className="flex flex-col">
-        <label className="mb-1 font-medium text-gray-600">{label}</label>
-        <input
-            type={type}
-            value={value}
-            onChange={onChange}
-            required={required}
-            readOnly={readOnly}
-            className={`p-2 border rounded-md focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 ${readOnly ? 'bg-gray-100' : ''}`}
-        />
-    </div>
+/* ------------------------------ Shared Helpers ------------------------------ */
+const Input = ({ label, ...props }) => (
+  <div>
+    <label className="mb-1 block text-sm text-gray-600">{label}</label>
+    <input {...props} className="p-2 border rounded-lg w-full" />
+  </div>
 );
 
-// --- Printable Invoice Generator ---
-const generatePrintableInvoice = (invoice) => {
-    const subTotal = invoice.items.reduce((sum, item) => sum + (item.quantity * item.rate), 0);
-    const totalTax = invoice.items.reduce((sum, item) => sum + (item.total - (item.quantity * item.rate)), 0);
-    const freight = parseFloat(invoice.freightCharges) || 0;
-    const totalAmount = invoice.totalAmount;
-    const amountPaid = invoice.amountPaid || 0;
-    const amountDue = totalAmount - amountPaid;
-
-    const itemsHtml = invoice.items.map(item => `
-        <tr class="item">
-            <td>${item.description}</td>
-            <td>${item.hsn}</td>
-            <td>${item.quantity}</td>
-            <td>${item.rate.toFixed(2)}</td>
-            <td>${((item.cgst || 0) + (item.sgst || 0) + (item.igst || 0)).toFixed(1)}%</td>
-            <td>${(item.quantity * item.rate).toFixed(2)}</td>
-            <td class="text-right">${item.total.toFixed(2)}</td>
-        </tr>
-    `).join('');
-
-    return `
-        <html>
-            <head>
-                <title>Invoice #${invoice.invoiceNumber}</title>
-                <style>
-                    body { font-family: 'Helvetica Neue', 'Helvetica', Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #333; }
-                    .invoice-box { max-width: 800px; margin: auto; padding: 30px; border: 1px solid #eee; box-shadow: 0 0 10px rgba(0, 0, 0, 0.15); }
-                    .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; }
-                    .header h1 { font-size: 45px; line-height: 45px; color: #333; margin: 0; }
-                    .company-details { text-align: right; }
-                    .details { display: flex; justify-content: space-between; margin-bottom: 40px; }
-                    .details-box { line-height: 1.4; }
-                    table { width: 100%; line-height: inherit; text-align: left; border-collapse: collapse; }
-                    table td { padding: 8px; vertical-align: top; }
-                    table tr.heading td { background: #eee; border-bottom: 1px solid #ddd; font-weight: bold; }
-                    table tr.item td { border-bottom: 1px solid #eee; }
-                    table tr.total td { border-top: 2px solid #eee; font-weight: bold; }
-                    .text-right { text-align: right; }
-                </style>
-            </head>
-            <body>
-                <div class="invoice-box">
-                    <div class="header">
-                        <div>
-                            <h1>INVOICE</h1>
-                            <div class="details-box">
-                                Invoice #: ${invoice.invoiceNumber}<br>
-                                Date: ${invoice.invoiceDate}<br>
-                                Due Date: ${invoice.dueDate}
-                            </div>
-                        </div>
-                        <div class="company-details">
-                            <strong>${companyDetails.name}</strong><br>
-                            ${companyDetails.address.replace(/\n/g, '<br>')}<br>
-                            ${companyDetails.phone}<br>
-                            ${companyDetails.email}
-                        </div>
-                    </div>
-                    <div class="details">
-                        <div class="details-box">
-                            <strong>Bill To:</strong><br>
-                            ${invoice.customerName}<br>
-                            ${(invoice.customerAddress || '').replace(/\n/g, '<br>')}<br>
-                            GSTIN: ${invoice.customerGstin}
-                        </div>
-                    </div>
-                    <table>
-                        <tr class="heading">
-                            <td>Description</td>
-                            <td>HSN/SAC</td>
-                            <td>Qty</td>
-                            <td>Rate</td>
-                            <td>Tax %</td>
-                            <td>Taxable Value</td>
-                            <td class="text-right">Total</td>
-                        </tr>
-                        ${itemsHtml}
-                        <tr class="total">
-                            <td colspan="6" class="text-right">Subtotal:</td>
-                            <td class="text-right">₹${subTotal.toFixed(2)}</td>
-                        </tr>
-                        <tr class="total">
-                            <td colspan="6" class="text-right">Total Tax:</td>
-                            <td class="text-right">₹${totalTax.toFixed(2)}</td>
-                        </tr>
-                         ${freight > 0 ? `
-                        <tr class="total">
-                            <td colspan="6" class="text-right">Freight Charges:</td>
-                            <td class="text-right">₹${freight.toFixed(2)}</td>
-                        </tr>
-                        ` : ''}
-                        <tr class="total">
-                            <td colspan="6" class="text-right"><strong>Total Amount:</strong></td>
-                            <td class="text-right"><strong>₹${totalAmount.toFixed(2)}</strong></td>
-                        </tr>
-                         <tr class="total">
-                            <td colspan="6" class="text-right">Amount Paid:</td>
-                            <td class="text-right">₹${amountPaid.toFixed(2)}</td>
-                        </tr>
-                         <tr class="total" style="color: red;">
-                            <td colspan="6" class="text-right"><strong>Amount Due:</strong></td>
-                            <td class="text-right"><strong>₹${amountDue.toFixed(2)}</strong></td>
-                        </tr>
-                    </table>
-                </div>
-            </body>
-        </html>
-    `;
+const loadLS = (key, fallback) => {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
 };
+const saveLS = (key, val) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(val));
+  } catch {}
+};
+
+const cmp = (a, b, key, dir) => {
+  const va = a?.[key] ?? "";
+  const vb = b?.[key] ?? "";
+  if (va < vb) return dir === "asc" ? -1 : 1;
+  if (va > vb) return dir === "asc" ? 1 : -1;
+  return 0;
+};
+
+/* ------------------------------ Printable Invoice (A4) ------------------------------ */
+function generatePrintableInvoice(inv) {
+  const itemsHtml = (inv.items || [])
+    .map((it) => {
+      const { taxable, cgstAmt, sgstAmt, igstAmt, total } = calcItem(it);
+      return `<tr>
+        <td>${it.description || ""}</td>
+        <td>${it.hsn || ""}</td>
+        <td style="text-align:right">${it.quantity || 0}</td>
+        <td style="text-align:right">${it.rate || 0}</td>
+        <td style="text-align:right">${taxable.toFixed(2)}</td>
+        <td style="text-align:right">${cgstAmt.toFixed(2)}</td>
+        <td style="text-align:right">${sgstAmt.toFixed(2)}</td>
+        <td style="text-align:right">${igstAmt.toFixed(2)}</td>
+        <td style="text-align:right">${total.toFixed(2)}</td>
+      </tr>`;
+    })
+    .join("");
+
+  return `
+  <html>
+  <head>
+    <title>${inv.invoiceNumber}</title>
+    <style>
+      @page { size: A4; margin: 20mm; }
+      body { font-family: Arial, sans-serif; font-size: 12px; color: #333; }
+      h2, h3 { margin: 0; padding: 0; }
+      .company { text-align: center; margin-bottom: 20px; }
+      .company h2 { font-size: 18px; font-weight: bold; }
+      .meta { margin-bottom: 10px; }
+      table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+      th, td { border: 1px solid #444; padding: 6px 8px; }
+      th { background: #f2f2f2; text-align: center; }
+      td { vertical-align: top; }
+      .totals { margin-top: 15px; text-align: right; }
+      .totals h3 { font-size: 14px; font-weight: bold; }
+      .footer { margin-top: 40px; text-align: center; font-size: 11px; color: #666; }
+    </style>
+  </head>
+  <body>
+    <div class="company">
+      <h2>${companyDetails.name}</h2>
+      <div>${companyDetails.address}</div>
+      <div>Phone: ${companyDetails.phone} | Email: ${companyDetails.email}</div>
+      <div>Owners: ${companyDetails.owners}</div>
+    </div>
+    <div class="meta">
+      <strong>Invoice:</strong> ${inv.invoiceNumber}<br/>
+      <strong>Date:</strong> ${inv.invoiceDate}<br/>
+      <strong>Due:</strong> ${inv.dueDate || "—"}<br/>
+      <strong>Customer:</strong> ${inv.customerName}<br/>
+      <strong>Address:</strong> ${inv.customerAddress || "—"}<br/>
+      <strong>GSTIN:</strong> ${inv.customerGstin || "—"}
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Description</th>
+          <th>HSN</th>
+          <th>Qty</th>
+          <th>Rate</th>
+          <th>Taxable</th>
+          <th>CGST</th>
+          <th>SGST</th>
+          <th>IGST</th>
+          <th>Total</th>
+        </tr>
+      </thead>
+      <tbody>${itemsHtml}</tbody>
+    </table>
+    <div class="totals">
+      <h3>Grand Total: ${fmtInr(inv.totalAmount || 0)}</h3>
+    </div>
+    <div class="footer">
+      <p>This is a computer-generated invoice. No signature required.</p>
+    </div>
+  </body>
+  </html>`;
+}
+
+// DEBUG sentinel to confirm file parses fully
+console.log("✅ App.js loaded");
