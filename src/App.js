@@ -6,11 +6,9 @@ import React, { useState, useEffect, useRef } from 'react';
 export default function App() {
     // All data is now stored in the browser's memory (React state).
     // It will reset every time you close or refresh the page.
-    const [user, setUser] = useState({ uid: 'local-user' }); // Mock user object
     const [currentView, setCurrentView] = useState('dashboard');
     const [invoices, setInvoices] = useState([]);
     const [customers, setCustomers] = useState([]);
-    const [loading, setLoading] = useState(false); // No initial loading needed
     const [editingInvoice, setEditingInvoice] = useState(null);
     const [editingCustomer, setEditingCustomer] = useState(null);
 
@@ -104,10 +102,6 @@ export default function App() {
                 return <DashboardView invoices={invoices} customers={customers} />;
         }
     };
-
-    if (loading) {
-        return <div className="flex items-center justify-center h-screen bg-gray-100"><div className="text-xl font-semibold">Loading PEATS Invoicing System...</div></div>;
-    }
 
     return (
         <div className="flex h-screen bg-gray-100 font-sans">
