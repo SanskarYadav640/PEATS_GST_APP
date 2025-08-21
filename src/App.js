@@ -4,43 +4,32 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 /**
  * PEATS — GST Invoice System
- * (Single-file App.js build)
+ * - Local persistence (invoices/customers)
+ * - Excel import/export (SheetJS)
+ * - Status: pending / paid-half / paid
+ * - PO Number + PO Image (dataURL)
+ * - Reports: received, remaining (paid-half handled), client summaries, Gmail reminders
+ * - Printable A4 boxed invoice with stamp & signature area
  */
 
 /* ------------------------------ Utils & Constants ------------------------------ */
-
 const CURRENCY = new Intl.NumberFormat("en-IN", {
   style: "currency",
   currency: "INR",
   minimumFractionDigits: 2,
 });
-const fmtInr = (n = 0) => CURRENCY.format(Number.isFinite(n) ? n : 0);
+const fmtInr = (n = 0) => CURRENCY.format(Number.isFinite(n) ? n : Number.isFinite(+n) ? +n : 0);
 const safeNum = (v) => (Number.isFinite(v) ? v : Number.isFinite(+v) ? +v : 0);
 const idGen = () => (crypto?.randomUUID ? crypto.randomUUID() : Date.now().toString());
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 const sum = (arr, key) => arr.reduce((acc, it) => acc + safeNum(it[key] ?? 0), 0);
-const todayISO = () => new Date().toISOString().split("T")[0];
+const todayISO = () => new Date().toISOString().slice(0, 10);
 function addDaysISO(isoStr, days) {
   const base = isoStr ? new Date(isoStr) : new Date();
   if (Number.isNaN(+base)) return todayISO();
   base.setDate(base.getDate() + Number(days || 0));
   return base.toISOString().slice(0, 10);
 }
-
-const GSTIN_REGEX = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/i;
-const GST_RATES = [2.5, 5, 8, 9, 18, 28]; // make sure this matches everywhere
-
-const calcItem = (item) => {
-  const qty = Math.max(0, safeNum(item.quantity));
-  const rate = Math.max(0, safeNum(item.rate));
-  const taxable = round2(qty * rate);
-  const cgstAmt = round2((taxable * Math.max(0, safeNum(item.cgst))) / 100);
-  const sgstAmt = round2((taxable * Math.max(0, safeNum(item.sgst))) / 100);
-  const igstAmt = round2((taxable * Math.max(0, safeNum(item.igst))) / 100);
-  const total = round2(taxable + cgstAmt + sgstAmt + igstAmt);
-  return { taxable, cgstAmt, sgstAmt, igstAmt, total };
-};
-
 function daysUntilDue(dueISO) {
   if (!dueISO) return null;
   const due = new Date(dueISO);
@@ -48,20 +37,14 @@ function daysUntilDue(dueISO) {
   const start = new Date(todayISO());
   start.setHours(0, 0, 0, 0);
   due.setHours(0, 0, 0, 0);
-  const diffMs = due - start; // positive => remaining, negative => overdue
+  const diffMs = due - start;
   return Math.round(diffMs / (1000 * 60 * 60 * 24));
 }
-
 function buildGmailLink({ to, subject, body }) {
   const base = "https://mail.google.com/mail/?view=cm&fs=1";
-  const params = new URLSearchParams({
-    to: to || "",
-    su: subject || "",
-    body: body || "",
-  });
+  const params = new URLSearchParams({ to: to || "", su: subject || "", body: body || "" });
   return `${base}&${params.toString()}`;
 }
-
 function formatReminderEmail(inv) {
   const days = daysUntilDue(inv.dueDate);
   const duePart = inv.dueDate
@@ -83,14 +66,10 @@ function formatReminderEmail(inv) {
     "ParthaSarthi Engineering and Training Services (PEATS)",
     "parthasarthiconsultancy@gmail.com",
   ];
-  return {
-    subject: `Payment Reminder — Invoice ${inv.invoiceNumber || ""}`,
-    body: lines.join("\n"),
-  };
+  return { subject: `Payment Reminder — Invoice ${inv.invoiceNumber || ""}`, body: lines.join("\n") };
 }
-
-// Invoice number generator — PINV/YYYY/MM/DD980001 (per day; start 980001)
-function nextInvoiceNumberForDate(dateStr, existingInvoices = []) {
+// Invoice number: PINV/YYYY/MM/DD980001 (per day; start 980001)
+function nextInvoiceNumberForDate(dateStr, existing = []) {
   if (!dateStr) {
     const t = new Date();
     const yyyy = String(t.getFullYear());
@@ -102,7 +81,7 @@ function nextInvoiceNumberForDate(dateStr, existingInvoices = []) {
   const mm = dateStr.slice(5, 7);
   const dd = dateStr.slice(8, 10);
   const prefix = `PINV/${yyyy}/${mm}/${dd}`;
-  const seqs = existingInvoices
+  const seqs = existing
     .map((inv) => inv?.invoiceNumber)
     .filter((n) => typeof n === "string" && n.startsWith(prefix))
     .map((n) => {
@@ -114,6 +93,20 @@ function nextInvoiceNumberForDate(dateStr, existingInvoices = []) {
   const next = seqs.length ? Math.max(...seqs) + 1 : base;
   return `${prefix}${next}`;
 }
+const GSTIN_REGEX = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/i;
+// Requested GST drop-down percentages:
+const GST_RATES = [2.5, 5, 8, 9, 18, 28];
+
+const calcItem = (item) => {
+  const qty = Math.max(0, safeNum(item.quantity));
+  const rate = Math.max(0, safeNum(item.rate));
+  const taxable = round2(qty * rate);
+  const cgstAmt = round2((taxable * Math.max(0, safeNum(item.cgst))) / 100);
+  const sgstAmt = round2((taxable * Math.max(0, safeNum(item.sgst))) / 100);
+  const igstAmt = round2((taxable * Math.max(0, safeNum(item.igst))) / 100);
+  const total = round2(taxable + cgstAmt + sgstAmt + igstAmt);
+  return { taxable, cgstAmt, sgstAmt, igstAmt, total };
+};
 
 /* ------------------------------ Company Details ------------------------------ */
 const companyDetails = {
@@ -131,7 +124,6 @@ const Icon = ({ path, className = "w-5 h-5" }) => (
     <path strokeLinecap="round" strokeLinejoin="round" d={path} />
   </svg>
 );
-
 const ICONS = {
   dashboard: "M3 3h18M3 7h18M3 21h18M3 7v14m6-14v14m6-14v14m6-14v14",
   invoice: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z",
@@ -224,7 +216,6 @@ export default function App() {
     if (type === "customer") setCustomers((prev) => prev.filter((c) => c.id !== id));
   };
 
-  // Quick in-place invoice updater (for inline status change)
   const quickUpdateInvoice = (patched) => {
     setInvoices((prev) => prev.map((x) => (x.id === patched.id ? patched : x)));
   };
@@ -312,7 +303,6 @@ export default function App() {
     </div>
   );
 }
-
 /* ------------------------------ Layout ------------------------------ */
 const Sidebar = ({ currentView, setView }) => {
   const nav = [
@@ -384,7 +374,13 @@ const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxRea
 
   const totals = useMemo(() => {
     const totalRevenue = sum(invoices, "totalAmount");
-    const outstanding = invoices.filter((inv) => inv.status !== "paid").reduce((acc, inv) => acc + safeNum(inv.totalAmount), 0);
+    // outstanding should respect paid-half
+    const outstanding = invoices.reduce((acc, inv) => {
+      if (inv.status === "paid") return acc;
+      const paid = inv.status === "paid-half" ? safeNum(inv.amountPaid || 0) : 0;
+      const rem = Math.max(0, safeNum(inv.totalAmount) - paid);
+      return acc + rem;
+    }, 0);
     return { totalRevenue, outstanding };
   }, [invoices]);
 
@@ -421,7 +417,8 @@ const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxRea
               customerGstin: row["Customer GSTIN"] ?? row["customer_gstin"] ?? "",
               customerEmail: row["Customer Email"] ?? row["customer_email"] ?? row["email"] ?? "",
               status: String(row["Invoice Status"] ?? row["status"] ?? "pending").toLowerCase(),
-              poNumber: row["PO Number"] ?? row["po_number"] ?? "",
+              amountPaid: safeNum(row["Amount Paid"] ?? row["amount_paid"] ?? 0),
+              poNumber: row["PO Number"] ?? row["Against PO Number"] ?? row["po_number"] ?? "",
               poImage: row["PO Image"] ?? row["po_image"] ?? "",
               poBaseValue: safeNum(row["PO Base Value"] ?? row["po_base_value"] ?? 0),
               poGstMode: row["PO GST Mode"] ?? row["po_gst_mode"] ?? "cgst_sgst",
@@ -492,7 +489,7 @@ const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxRea
           <input type="file" ref={fileRef} onChange={importExcel} className="hidden" accept=".xlsx,.xls" />
           <ExportExcelButton invoices={invoices} disabled={!xlsxReady} />
           <ExportJsonButton invoices={invoices} customers={customers} />
-          {/* Clear Local Data removed as requested */}
+          {/* Clear data button removed by request */}
         </div>
       </div>
 
@@ -533,11 +530,12 @@ const ExportExcelButton = ({ invoices, disabled }) => {
           "Customer GSTIN": invoice.customerGstin,
           "Customer Email": invoice.customerEmail || "",
           "Invoice Status": invoice.status,
-          "PO Number": invoice.poNumber || "",
+          "Amount Paid": round2(safeNum(invoice.amountPaid || 0)),
+          "Against PO Number": invoice.poNumber || "",
           "PO Image": invoice.poImage || "",
-          "PO Base Value": round2(invoice.poBaseValue || 0),
+          "PO Base Value": round2(safeNum(invoice.poBaseValue || 0)),
           "PO GST Mode": invoice.poGstMode || "cgst_sgst",
-          "PO GST %": round2(invoice.poGstRate ?? 0),
+          "PO GST %": safeNum(invoice.poGstRate ?? 18),
           "Item Description": item.description,
           "HSN/SAC": item.hsn,
           Quantity: item.quantity,
@@ -605,14 +603,12 @@ const ExportJsonButton = ({ invoices, customers }) => {
     }, 0);
   };
   return (
-    <button
-      onClick={onClick}
-      className="inline-flex items-center px-4 py-2 rounded-lg shadow bg-gray-800 text-white hover:bg-black"
-    >
+    <button onClick={onClick} className="inline-flex items-center px-4 py-2 rounded-lg shadow bg-gray-800 text-white hover:bg-black">
       <Icon path={ICONS.download} className="w-5 h-5 mr-2" /> Backup JSON
     </button>
   );
 };
+
 /* ------------------------------ Invoices List ------------------------------ */
 const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate, onQuickUpdate }) => {
   const [query, setQuery] = useState("");
@@ -660,8 +656,8 @@ const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate, onQuickUpdat
     }
   };
 
-  const th = (label, key, width) => (
-    <th className={`p-3 ${width ?? ""} cursor-pointer select-none whitespace-nowrap`} onClick={() => toggleSort(key)} title="Sort">
+  const th = (label, key) => (
+    <th className="p-3 cursor-pointer select-none whitespace-nowrap" onClick={() => toggleSort(key)} title="Sort">
       <div className="inline-flex items-center gap-1">
         {label}
         <span className="text-xs text-gray-400">{sortKey === key ? (sortDir === "asc" ? "▲" : "▼") : ""}</span>
@@ -724,7 +720,11 @@ const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate, onQuickUpdat
                       value={inv.status}
                       onChange={(e) => onQuickUpdate({ ...inv, status: e.target.value })}
                       className={`px-2 py-1 border rounded-lg ${
-                        inv.status === "paid" ? "bg-green-50 text-green-700" : inv.status === "paid-half" ? "bg-blue-50 text-blue-700" : "bg-amber-50 text-amber-700"
+                        inv.status === "paid"
+                          ? "bg-green-50 text-green-700"
+                          : inv.status === "paid-half"
+                          ? "bg-blue-50 text-blue-700"
+                          : "bg-amber-50 text-amber-700"
                       }`}
                     >
                       <option value="pending">Pending</option>
@@ -735,9 +735,21 @@ const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate, onQuickUpdat
                   <td className="p-3">
                     <div className="flex items-center gap-1">
                       <IconBtn title="Edit" onClick={() => onEdit(inv)} icon={ICONS.edit} className="text-blue-600 hover:bg-blue-50" />
-                      <IconBtn title="Duplicate" onClick={() => onDuplicate(inv)} icon={ICONS.duplicate} className="text-purple-600 hover:bg-purple-50" />
-                      <IconBtn title="Delete" onClick={() => handleDelete(inv.id)} icon={ICONS.delete} className="text-red-600 hover:bg-red-50" />
-                      <a href={mailto} target="_blank" rel="noreferrer" title="Send Reminder" className="p-2 rounded-lg text-amber-700 hover:bg-amber-50">✉</a>
+                      <IconBtn
+                        title="Duplicate"
+                        onClick={() => onDuplicate(inv)}
+                        icon={ICONS.duplicate}
+                        className="text-purple-600 hover:bg-purple-50"
+                      />
+                      <IconBtn
+                        title="Delete"
+                        onClick={() => handleDelete(inv.id)}
+                        icon={ICONS.delete}
+                        className="text-red-600 hover:bg-red-50"
+                      />
+                      <a href={mailto} target="_blank" rel="noreferrer" title="Send Reminder" className="p-2 rounded-lg text-amber-700 hover:bg-amber-50">
+                        ✉
+                      </a>
                       <IconBtn title="Print" onClick={() => handlePrint(inv)} icon={ICONS.print} className="text-gray-700 hover:bg-gray-100" />
                     </div>
                   </td>
@@ -759,7 +771,6 @@ const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate, onQuickUpdat
     </div>
   );
 };
-
 const Pagination = ({ page, totalPages, onPageChange }) => (
   <div className="flex items-center justify-end gap-2 mt-4">
     <button onClick={() => onPageChange(Math.max(1, page - 1))} className="px-3 py-1 border rounded-lg disabled:opacity-50" disabled={page === 1}>
@@ -848,10 +859,8 @@ const CustomerListView = ({ customers, onEdit, onDelete }) => {
   );
 };
 
-/* ------------------------------ Reports ------------------------------ */
+/* ------------------------------ Reports (paid-half aware) ------------------------------ */
 const ReportsView = ({ invoices, customers, xlsxReady }) => {
-  // Totals: fully-paid counts in full, paid-half counts only the paid portion as received,
-  // remaining is the unpaid portion across all non-paid invoices.
   const totals = useMemo(() => {
     const received = invoices.reduce((s, i) => {
       if (i.status === "paid") return s + safeNum(i.totalAmount);
@@ -869,7 +878,6 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
     return { received: round2(received), remaining: round2(remaining) };
   }, [invoices]);
 
-  // Rows of pending invoices (include paid-half with remaining > 0), sorted by aging
   const pendingRows = useMemo(() => {
     return invoices
       .filter((i) => i.status !== "paid")
@@ -898,11 +906,10 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
       .sort((a, b) => {
         const da = a.days ?? 9999;
         const db = b.days ?? 9999;
-        return da - db; // most overdue first
+        return da - db;
       });
   }, [invoices, customers]);
 
-  // Client summary: remaining per customer (sums remaining across their non-paid invoices)
   const clientSummary = useMemo(() => {
     const map = new Map();
     invoices.forEach((i) => {
@@ -948,10 +955,7 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
       "ParthaSarthi Engineering and Training Services (PEATS)",
       "parthasarthiconsultancy@gmail.com",
     ];
-    return {
-      subject: "Payment Reminder — Pending Invoices Summary",
-      body: lines.join("\n"),
-    };
+    return { subject: "Payment Reminder — Pending Invoices Summary", body: lines.join("\n") };
   }
 
   return (
@@ -1028,7 +1032,7 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
                   invoiceNumber: r.invoiceNumber,
                   dueDate: r.dueDate === "—" ? "" : r.dueDate,
                   customerName: r.customerName,
-                  totalAmount: r.amountRemaining, // email shows remaining due
+                  totalAmount: r.amountRemaining,
                 });
                 const link = buildGmailLink({ to: r.customerEmail || "", subject, body });
 
@@ -1085,11 +1089,11 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
 
 /* ------------------------------ Forms ------------------------------ */
 const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice }) => {
-  const [touchedNumber] = useState(false); // kept but unused since number is read-only now
+  const [touchedNumber] = useState(false); // number is read-only now
   const [invoice, setInvoice] = useState(() => {
     const initDate = existingInvoice?.invoiceDate || todayISO();
     const defaultNumber = existingInvoice?.invoiceNumber || nextInvoiceNumberForDate(initDate, allInvoices);
-    const initialDue = existingInvoice?.dueDate || addDaysISO(initDate, 45); // +45 days auto
+    const initialDue = existingInvoice?.dueDate || addDaysISO(initDate, 45);
     return {
       id: existingInvoice?.id || null,
       invoiceNumber: defaultNumber,
@@ -1100,7 +1104,6 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
       customerAddress: existingInvoice?.customerAddress || "",
       customerGstin: existingInvoice?.customerGstin || "",
       customerEmail: existingInvoice?.customerEmail || "",
-      /* PO fields */
       poNumber: existingInvoice?.poNumber || "",
       poImage: existingInvoice?.poImage || "",
       poBaseValue: safeNum(existingInvoice?.poBaseValue || 0),
@@ -1109,25 +1112,13 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
       items: existingInvoice?.items?.length
         ? existingInvoice.items
         : [
-            {
-              description: "",
-              hsn: "",
-              quantity: 1,
-              rate: 0,
-              cgst: 0,
-              sgst: 0,
-              igst: 0,
-              gstMode: "cgst_sgst",
-              gstRate: 18,
-              total: 0,
-            },
+            { description: "", hsn: "", quantity: 1, rate: 0, cgst: 0, sgst: 0, igst: 0, gstMode: "cgst_sgst", gstRate: 18, total: 0 },
           ],
       status: existingInvoice?.status || "pending",
       amountPaid: safeNum(existingInvoice?.amountPaid || 0),
     };
   });
 
-  // Auto-update due date when invoice date changes (only for new invoices)
   useEffect(() => {
     if (existingInvoice?.id) return;
     if (touchedNumber) return;
@@ -1214,12 +1205,10 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
   const removeItem = (idx) => setInvoice((prev) => ({ ...prev, items: prev.items.filter((_, i) => i !== idx) }));
 
   function validateBeforeSave() {
-    // Required: dates
     if (!invoice.invoiceDate || !invoice.dueDate) {
       alert("Please select Invoice Date and Due Date.");
       return false;
     }
-    // Required: customer core details
     if (!invoice.customerName?.trim()) {
       alert("Customer name is required.");
       return false;
@@ -1232,7 +1221,6 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
       alert("Customer email is required.");
       return false;
     }
-    // Items: at least one valid line
     const hasValidItem = invoice.items.some(
       (it) => it.description?.trim() && safeNum(it.quantity) > 0 && safeNum(it.rate) > 0
     );
@@ -1240,7 +1228,6 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
       alert("Add at least one item with description, quantity > 0, and rate > 0.");
       return false;
     }
-    // Paid-Half requires amountPaid
     if (invoice.status === "paid-half") {
       if (!(safeNum(invoice.amountPaid) > 0)) {
         alert("Please enter the Amount Paid for Paid-Half invoices.");
@@ -1251,7 +1238,6 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
         return false;
       }
     }
-    // (Optional) Validate GSTIN if present
     if (invoice.customerGstin && !GSTIN_REGEX.test(invoice.customerGstin)) {
       if (!window.confirm("Customer GSTIN does not look valid. Save anyway?")) return false;
     }
@@ -1312,7 +1298,6 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
           </div>
           <Input label="Customer Name" value={invoice.customerName} onChange={(e) => setInvoice({ ...invoice, customerName: e.target.value })} required />
           <Input label="Customer Address" value={invoice.customerAddress} onChange={(e) => setInvoice({ ...invoice, customerAddress: e.target.value })} required />
-          {/* Keep default format; no toUpperCase */}
           <Input label="Customer GSTIN" value={invoice.customerGstin} onChange={(e) => setInvoice({ ...invoice, customerGstin: e.target.value })} />
           <Input label="Customer Email" value={invoice.customerEmail} onChange={(e) => setInvoice({ ...invoice, customerEmail: e.target.value })} required />
         </div>
@@ -1332,18 +1317,14 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
                 const f = e.target.files?.[0];
                 if (!f) return;
                 const reader = new FileReader();
-                reader.onload = (ev) => setInvoice((prev) => ({ ...prev, poImage: String(ev.target.result) })); // dataURL
+                reader.onload = (ev) => setInvoice((prev) => ({ ...prev, poImage: String(ev.target.result) }));
                 reader.readAsDataURL(f);
               }}
               className="p-2 border rounded-lg w-full bg-white"
             />
             {invoice.poImage && (
               <div className="mt-2 space-y-1">
-                <img
-                  src={invoice.poImage}
-                  alt="PO"
-                  className="max-h-32 rounded border"
-                />
+                <img src={invoice.poImage} alt="PO" className="max-h-32 rounded border" />
                 <div>
                   <a href={invoice.poImage} target="_blank" rel="noreferrer" className="text-indigo-600 text-sm inline-block underline">
                     View full size
@@ -1526,7 +1507,38 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
   );
 };
 
+const CustomerForm = ({ onSave, onCancel, existingCustomer }) => {
+  const [c, setC] = useState(() =>
+    existingCustomer || { id: null, name: "", email: "", phone: "", address: "", gstin: "" }
+  );
 
+  const submit = (e) => {
+    e.preventDefault();
+    if (!c.name) return alert("Name is required");
+    if (c.gstin && !GSTIN_REGEX.test(c.gstin)) {
+      if (!window.confirm("GSTIN does not look valid. Save anyway?")) return;
+    }
+    onSave(c);
+  };
+
+  return (
+    <form onSubmit={submit} className="bg-white p-6 rounded-xl shadow space-y-4">
+      <Input label="Customer Name" value={c.name} onChange={(e) => setC({ ...c, name: e.target.value })} required />
+      <Input label="Email" value={c.email} onChange={(e) => setC({ ...c, email: e.target.value })} />
+      <Input label="Phone" value={c.phone} onChange={(e) => setC({ ...c, phone: e.target.value })} />
+      <Input label="Address" value={c.address} onChange={(e) => setC({ ...c, address: e.target.value })} />
+      <Input label="GSTIN" value={c.gstin} onChange={(e) => setC({ ...c, gstin: e.target.value })} />
+      <div className="flex justify-end gap-3">
+        <button type="button" onClick={onCancel} className="px-4 py-2 bg-gray-200 rounded">
+          Cancel
+        </button>
+        <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded">
+          Save
+        </button>
+      </div>
+    </form>
+  );
+};
 /* ------------------------------ Shared Helpers ------------------------------ */
 const Input = ({ label, ...props }) => (
   <div>
@@ -1553,7 +1565,6 @@ const cmp = (a, b, key, dir) => {
   const va = a?.[key] ?? "";
   const vb = b?.[key] ?? "";
   if (va < vb) return dir === "asc" ? -1 : 1;
- 
   if (va > vb) return dir === "asc" ? 1 : -1;
   return 0;
 };
@@ -1595,7 +1606,7 @@ function generatePrintableInvoice(inv) {
   const dueInfo = inv.dueDate ? `Due Date: ${inv.dueDate}` : "";
   const poBlock = `
     <div style="margin-top:6px">
-      <strong>PO No:</strong> ${escapeHtml(inv.poNumber || "—")}
+      <strong>Against PO Number:</strong> ${escapeHtml(inv.poNumber || "—")}
       ${inv.poImage ? `&nbsp;&nbsp;|&nbsp;&nbsp;<a href="${inv.poImage}" target="_blank">View PO Image</a>` : ""}
     </div>`;
 
@@ -1629,7 +1640,7 @@ function generatePrintableInvoice(inv) {
         <h1>${escapeHtml(companyDetails.name)}</h1>
         <div>${escapeHtml(companyDetails.address)}</div>
         <div>Phone: ${escapeHtml(companyDetails.phone)} &nbsp;|&nbsp; Email: ${escapeHtml(companyDetails.email)}</div>
-        <div class="muted">Owners: ${escapeHtml(companyDetails.owners)}</div>
+        <div class="muted">Owner: ${escapeHtml(companyDetails.owners)}</div>
       </div>
       <div style="text-align:right">
         <h2>Tax Invoice</h2>
@@ -1706,10 +1717,7 @@ function generatePrintableInvoice(inv) {
 
 /* escape for printing */
 function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 console.log("✅ App.js loaded");
