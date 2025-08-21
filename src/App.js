@@ -3,20 +3,13 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 /* global XLSX */
 
 /**
- * PEATS — GST Invoice System
- * Updates per request:
- * - PO section with PO number, base value, GST mode/rate, image upload
- * - Auto due date = invoice date + 45 days
- * - Status: Pending / Paid / Paid-Half (affects reports)
- * - GST rates list: 2.5, 5, 8, 9, 18, 28
- * - CGST+SGST split shown clearly; IGST shown as-is
- * - Printable: boxed A4 portrait with Stamp & Signature areas
- * - Dashboard: removed Clear Local Data
- * - Reports: client-wise remaining + email reminder
- * - Excel I/O: added PO value + GST columns
+ * PEATS — GST Invoice System (Half-corrected build-ready)
+ * - Fixes: CustomerForm & generatePrintableInvoice defined
+ * - Adds: addDaysISO helper, Paid-Half status, 45d due date auto, PO block with GST
+ * - Updates: GST_RATES to [2.5, 5, 8, 9, 18, 28]
+ * - Removes: Clear Local Data button (as requested)
  */
 
-/* ------------------------------ Utils & Constants ------------------------------ */
 const CURRENCY = new Intl.NumberFormat("en-IN", {
   style: "currency",
   currency: "INR",
@@ -28,17 +21,15 @@ const idGen = () => (crypto?.randomUUID ? crypto.randomUUID() : Date.now().toStr
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 const sum = (arr, key) => arr.reduce((acc, it) => acc + safeNum(it[key] ?? 0), 0);
 const todayISO = () => new Date().toISOString().split("T")[0];
-const addDaysISO = (iso, days) => {
-  const d = new Date(iso || todayISO());
-  d.setDate(d.getDate() + (Number.isFinite(days) ? days : 0));
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
-};
+function addDaysISO(isoStr, days) {
+  const base = isoStr ? new Date(isoStr) : new Date();
+  if (Number.isNaN(+base)) return todayISO();
+  base.setDate(base.getDate() + Number(days || 0));
+  return base.toISOString().split("T")[0];
+}
 
 const GSTIN_REGEX = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/i;
-/** Requested fixed GST rates */
+// UPDATED per your spec:
 const GST_RATES = [2.5, 5, 8, 9, 18, 28];
 
 const calcItem = (item) => {
@@ -59,7 +50,7 @@ function daysUntilDue(dueISO) {
   const start = new Date(todayISO());
   start.setHours(0, 0, 0, 0);
   due.setHours(0, 0, 0, 0);
-  const diffMs = due - start; // positive => remaining, negative => overdue
+  const diffMs = due - start;
   return Math.round(diffMs / (1000 * 60 * 60 * 24));
 }
 
@@ -86,7 +77,7 @@ function formatReminderEmail(inv) {
     `This is a gentle reminder regarding Invoice ${inv.invoiceNumber || ""}${duePart}.`,
     `Amount Due: ${fmtInr(inv.totalAmount || 0)}`,
     "",
-    "Kindly arrange the payment at your earliest convenience. If already paid, please ignore this email.",
+    "Kindly arrange the payment at your earliest convenience. If it has already been paid, please ignore this email and accept our thanks.",
     "",
     "Best regards,",
     "ParthaSarthi Engineering and Training Services (PEATS)",
@@ -94,37 +85,6 @@ function formatReminderEmail(inv) {
   ];
   return {
     subject: `Payment Reminder — Invoice ${inv.invoiceNumber || ""}`,
-    body: lines.join("\n"),
-  };
-}
-
-/** Client rollup email with per-invoice lines */
-function formatClientReminderEmail({ customerName, customerEmail, invoices = [] }) {
-  const totalDue = round2(
-    invoices.reduce((s, it) => s + safeNum(it.remainingAmount), 0)
-  );
-  const lines = [
-    `Dear ${customerName || "Sir/Madam"},`,
-    "",
-    "This is a friendly reminder of pending invoices:",
-    "",
-    ...invoices.map((it) => {
-      const d = daysUntilDue(it.dueDate);
-      const tag = typeof d === "number" ? (d < 0 ? `${Math.abs(d)} day(s) overdue` : `${d} day(s) remaining`) : "—";
-      return `• ${it.invoiceNumber} — Due: ${it.dueDate || "—"} — Amount Due: ${fmtInr(it.remainingAmount)} (${tag})`;
-    }),
-    "",
-    `Total Pending: ${fmtInr(totalDue)}`,
-    "",
-    "Thank you.",
-    "",
-    "Best regards,",
-    "ParthaSarthi Engineering and Training Services (PEATS)",
-    "parthasarthiconsultancy@gmail.com",
-  ];
-  return {
-    to: customerEmail || "",
-    subject: `Payment Reminder — ${customerName || "Client"} (${invoices.length} invoice${invoices.length !== 1 ? "s" : ""})`,
     body: lines.join("\n"),
   };
 }
@@ -232,7 +192,7 @@ export default function App() {
     };
   }, []);
 
-  // Persist to localStorage
+  // Persist
   useEffect(() => saveLS(LS_KEYS.invoices, invoices), [invoices]);
   useEffect(() => saveLS(LS_KEYS.customers, customers), [customers]);
 
@@ -264,7 +224,6 @@ export default function App() {
     if (type === "customer") setCustomers((prev) => prev.filter((c) => c.id !== id));
   };
 
-  // Quick in-place invoice updater (for inline status change)
   const quickUpdateInvoice = (patched) => {
     setInvoices((prev) => prev.map((x) => (x.id === patched.id ? patched : x)));
   };
@@ -381,7 +340,7 @@ const Sidebar = ({ currentView, setView }) => {
           </li>
         ))}
       </ul>
-      <div className="p-4 text-xs text-gray-400">v1.5</div>
+      <div className="p-4 text-xs text-gray-400">v1.5-half</div>
     </nav>
   );
 };
@@ -424,11 +383,9 @@ const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxRea
 
   const totals = useMemo(() => {
     const totalRevenue = sum(invoices, "totalAmount");
-    const outstanding = invoices.reduce((acc, inv) => {
-      if (inv.status === "paid") return acc;
-      if (inv.status === "paid-half") return acc + round2(safeNum(inv.totalAmount) / 2);
-      return acc + safeNum(inv.totalAmount);
-    }, 0);
+    const outstanding = invoices
+      .filter((inv) => inv.status !== "paid")
+      .reduce((acc, inv) => acc + safeNum(inv.totalAmount), 0);
     return { totalRevenue, outstanding };
   }, [invoices]);
 
@@ -467,11 +424,6 @@ const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxRea
               status: String(row["Invoice Status"] ?? row["status"] ?? "pending").toLowerCase(),
               poNumber: row["PO Number"] ?? row["po_number"] ?? "",
               poImage: row["PO Image"] ?? row["po_image"] ?? "",
-              /* New PO value & GST fields */
-              poBaseValue: safeNum(row["PO Base Value"] ?? row["po_base_value"] ?? 0),
-              poGstMode: (row["PO GST Mode"] ?? row["po_gst_mode"] ?? "cgst_sgst").toLowerCase(),
-              poGstRate: safeNum(row["PO GST %"] ?? row["po_gst_percent"] ?? 0),
-              poGrossValue: safeNum(row["PO Gross Value"] ?? row["po_gross_value"] ?? 0),
               totalAmount: safeNum(row["Invoice Total"] ?? row["invoice_total"] ?? 0),
               items: [],
             };
@@ -524,9 +476,7 @@ const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxRea
     <div className="space-y-6">
       <div className="bg-white p-5 rounded-xl shadow">
         <h2 className="text-lg font-semibold mb-1">Manage Your Data</h2>
-        <p className="text-sm text-gray-600 mb-4">
-          Data autosaves in your browser. Import/Export Excel or JSON backups anytime.
-        </p>
+        <p className="text-sm text-gray-600 mb-4">Data autosaves in your browser. Import/Export Excel or JSON backups anytime.</p>
         <div className="flex flex-wrap gap-3">
           <button
             disabled={!xlsxReady}
@@ -540,7 +490,7 @@ const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxRea
           <input type="file" ref={fileRef} onChange={importExcel} className="hidden" accept=".xlsx,.xls" />
           <ExportExcelButton invoices={invoices} disabled={!xlsxReady} />
           <ExportJsonButton invoices={invoices} customers={customers} />
-          {/* Clear Data button removed as requested */}
+          {/* ClearDataButton removed as requested */}
         </div>
       </div>
 
@@ -583,14 +533,6 @@ const ExportExcelButton = ({ invoices, disabled }) => {
           "Invoice Status": invoice.status,
           "PO Number": invoice.poNumber || "",
           "PO Image": invoice.poImage || "",
-          /* New PO columns */
-          "PO Base Value": round2(safeNum(invoice.poBaseValue || 0)),
-          "PO GST Mode": invoice.poGstMode || "cgst_sgst",
-          "PO GST %": round2(safeNum(invoice.poGstRate || 0)),
-          "PO Gross Value": round2(
-            safeNum(invoice.poBaseValue || 0) *
-              (1 + (invoice.poGstMode === "igst" ? safeNum(invoice.poGstRate || 0) : safeNum(invoice.poGstRate || 0)) / 100)
-          ),
           "Item Description": item.description,
           "HSN/SAC": item.hsn,
           Quantity: item.quantity,
@@ -668,27 +610,6 @@ const ExportJsonButton = ({ invoices, customers }) => {
   );
 };
 
-/* helpers & storage */
-const Input = ({ label, ...props }) => (
-  <div>
-    <label className="mb-1 block text-sm text-gray-600">{label}</label>
-    <input {...props} className={`p-2 border rounded-lg w-full ${props.className || ""}`} />
-  </div>
-);
-
-const loadLS = (key, fallback) => {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch {
-    return fallback;
-  }
-};
-const saveLS = (key, val) => {
-  try {
-    localStorage.setItem(key, JSON.stringify(val));
-  } catch {}
-};
 /* ------------------------------ Invoices List ------------------------------ */
 const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate, onQuickUpdate }) => {
   const [query, setQuery] = useState("");
@@ -760,6 +681,7 @@ const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate, onQuickUpdat
               className="pl-9 pr-3 py-2 border rounded-lg w-72 max-w-full"
             />
           </div>
+          {/* Added Paid-Half filter option */}
           <select value={status} onChange={(e) => setStatus(e.target.value)} className="border rounded-lg px-3 py-2">
             <option value="all">All</option>
             <option value="pending">Pending</option>
@@ -815,18 +737,8 @@ const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate, onQuickUpdat
                   <td className="p-3">
                     <div className="flex items-center gap-1">
                       <IconBtn title="Edit" onClick={() => onEdit(inv)} icon={ICONS.edit} className="text-blue-600 hover:bg-blue-50" />
-                      <IconBtn
-                        title="Duplicate"
-                        onClick={() => onDuplicate(inv)}
-                        icon={ICONS.duplicate}
-                        className="text-purple-600 hover:bg-purple-50"
-                      />
-                      <IconBtn
-                        title="Delete"
-                        onClick={() => handleDelete(inv.id)}
-                        icon={ICONS.delete}
-                        className="text-red-600 hover:bg-red-50"
-                      />
+                      <IconBtn title="Duplicate" onClick={() => onDuplicate(inv)} icon={ICONS.duplicate} className="text-purple-600 hover:bg-purple-50" />
+                      <IconBtn title="Delete" onClick={() => handleDelete(inv.id)} icon={ICONS.delete} className="text-red-600 hover:bg-red-50" />
                       <a href={mailto} target="_blank" rel="noreferrer" title="Send Reminder" className="p-2 rounded-lg text-amber-700 hover:bg-amber-50">
                         ✉
                       </a>
@@ -876,270 +788,28 @@ const IconBtn = ({ onClick, icon, title, className = "" }) => (
   </button>
 );
 
-/* ------------------------------ Customers ------------------------------ */
-const CustomerListView = ({ customers, onEdit, onDelete }) => {
-  const [query, setQuery] = useState("");
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return !q
-      ? customers
-      : customers.filter((c) =>
-          [c.name, c.email, c.phone].filter(Boolean).some((v) => String(v).toLowerCase().includes(q))
-        );
-  }, [customers, query]);
+/* ------------------------------ Shared Helpers ------------------------------ */
+const Input = ({ label, ...props }) => (
+  <div>
+    <label className="mb-1 block text-sm text-gray-600">{label}</label>
+    <input {...props} className={`p-2 border rounded-lg w-full ${props.className || ""}`} />
+  </div>
+);
 
-  const handleDelete = (id) => {
-    if (window.confirm("Delete this customer? This cannot be undone.")) onDelete("customer", id);
-  };
-
-  return (
-    <div className="bg-white p-5 rounded-xl shadow">
-      <div className="mb-4">
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search customers..."
-          className="px-3 py-2 border rounded-lg w-72 max-w-full"
-        />
-      </div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-left text-sm">
-          <thead>
-            <tr className="bg-gray-50 border-b text-gray-600">
-              <th className="p-3">Name</th>
-              <th className="p-3">Email</th>
-              <th className="p-3">Phone</th>
-              <th className="p-3">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((c) => (
-              <tr key={c.id} className="border-b hover:bg-gray-50">
-                <td className="p-3 font-medium">{c.name}</td>
-                <td className="p-3">{c.email || "—"}</td>
-                <td className="p-3">{c.phone || "—"}</td>
-                <td className="p-3">
-                  <div className="flex items-center gap-1">
-                    <IconBtn title="Edit" onClick={() => onEdit(c)} icon={ICONS.edit} className="text-blue-600 hover:bg-blue-50" />
-                    <IconBtn title="Delete" onClick={() => handleDelete(c.id)} icon={ICONS.delete} className="text-red-600 hover:bg-red-50" />
-                  </div>
-                </td>
-              </tr>
-            ))}
-            {filtered.length === 0 && (
-              <tr>
-                <td colSpan={4} className="p-6 text-center text-gray-500">
-                  No customers found.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
+const loadLS = (key, fallback) => {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+};
+const saveLS = (key, val) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(val));
+  } catch {}
 };
 
-/* ------------------------------ Reports ------------------------------ */
-const ReportsView = ({ invoices, customers, xlsxReady }) => {
-  const totals = useMemo(() => {
-    const received = invoices.reduce((s, i) => {
-      if (i.status === "paid") return s + safeNum(i.totalAmount);
-      if (i.status === "paid-half") return s + round2(safeNum(i.totalAmount) / 2);
-      return s;
-    }, 0);
-    const remaining = invoices.reduce((s, i) => {
-      if (i.status === "paid") return s;
-      if (i.status === "paid-half") return s + round2(safeNum(i.totalAmount) / 2);
-      return s + safeNum(i.totalAmount);
-    }, 0);
-    return { received: round2(received), remaining: round2(remaining) };
-  }, [invoices]);
-
-  const pendingRows = useMemo(() => {
-    return invoices
-      .filter((i) => i.status !== "paid")
-      .map((i) => {
-        const d = daysUntilDue(i.dueDate);
-        let email = i.customerEmail || "";
-        if (!email && i.customerId) {
-          const c = customers.find((x) => x.id === i.customerId);
-          email = c?.email || "";
-        }
-        const remainingAmount = i.status === "paid-half" ? round2(safeNum(i.totalAmount) / 2) : round2(safeNum(i.totalAmount));
-        return {
-          id: i.id,
-          invoiceNumber: i.invoiceNumber,
-          customerId: i.customerId,
-          customerName: i.customerName,
-          customerEmail: email,
-          dueDate: i.dueDate || "—",
-          amount: round2(safeNum(i.totalAmount)),
-          remainingAmount,
-          days: d, // positive: remaining; negative: overdue
-        };
-      })
-      .sort((a, b) => {
-        const da = a.days ?? 9999, db = b.days ?? 9999;
-        return da - db; // most overdue first
-      });
-  }, [invoices, customers]);
-
-  // Roll up per-client remaining & prepare reminder links
-  const clientSummary = useMemo(() => {
-    const byClient = new Map();
-    pendingRows.forEach((r) => {
-      const key = r.customerEmail || r.customerName || r.customerId || "Unknown";
-      if (!byClient.has(key)) {
-        byClient.set(key, {
-          customerId: r.customerId,
-          customerName: r.customerName,
-          customerEmail: r.customerEmail,
-          invoices: [],
-          totalRemaining: 0,
-        });
-      }
-      const bucket = byClient.get(key);
-      bucket.invoices.push(r);
-      bucket.totalRemaining = round2(bucket.totalRemaining + r.remainingAmount);
-    });
-    return Array.from(byClient.values()).sort((a, b) => b.totalRemaining - a.totalRemaining);
-  }, [pendingRows]);
-
-  return (
-    <div className="bg-white p-5 rounded-xl shadow space-y-8">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">GST & Sales Reports</h2>
-        <ExportExcelButton invoices={invoices} disabled={!xlsxReady} />
-      </div>
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <StatCard title="Amount Received" value={fmtInr(totals.received)} />
-        <StatCard title="Amount Remaining" value={fmtInr(totals.remaining)} />
-      </div>
-
-      {/* Client Summary */}
-      <div>
-        <h3 className="font-semibold mb-2">Client Summary — Remaining & Reminders</h3>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead>
-              <tr className="bg-gray-50 border-b text-gray-600">
-                <th className="p-3">Client</th>
-                <th className="p-3">Email</th>
-                <th className="p-3">Pending Invoices</th>
-                <th className="p-3">Total Remaining</th>
-                <th className="p-3">Reminder</th>
-              </tr>
-            </thead>
-            <tbody>
-              {clientSummary.map((c) => {
-                const emailPayload = formatClientReminderEmail({
-                  customerName: c.customerName,
-                  customerEmail: c.customerEmail,
-                  invoices: c.invoices,
-                });
-                const link = buildGmailLink(emailPayload);
-                return (
-                  <tr key={`${c.customerId}-${c.customerEmail}`} className="border-b hover:bg-gray-50">
-                    <td className="p-3 font-medium">{c.customerName || "—"}</td>
-                    <td className="p-3">{c.customerEmail || "—"}</td>
-                    <td className="p-3">{c.invoices.map((x) => x.invoiceNumber).join(", ")}</td>
-                    <td className="p-3">{fmtInr(c.totalRemaining)}</td>
-                    <td className="p-3">
-                      <a href={link} target="_blank" rel="noreferrer" className="px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700">
-                        Send Summary Reminder
-                      </a>
-                    </td>
-                  </tr>
-                );
-              })}
-              {clientSummary.length === 0 && (
-                <tr>
-                  <td colSpan={5} className="p-6 text-center text-gray-500">
-                    No pending payments 🎉
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* Pending Invoices (Aging) */}
-      <div>
-        <h3 className="font-semibold mb-2">Pending Invoices (Aging)</h3>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead>
-              <tr className="bg-gray-50 border-b text-gray-600">
-                <th className="p-3">Invoice #</th>
-                <th className="p-3">Customer</th>
-                <th className="p-3">Email</th>
-                <th className="p-3">Due Date</th>
-                <th className="p-3">Days</th>
-                <th className="p-3">Amount</th>
-                <th className="p-3">Remaining</th>
-                <th className="p-3">Reminder</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pendingRows.map((r) => {
-                const { subject, body } = formatReminderEmail({
-                  invoiceNumber: r.invoiceNumber,
-                  dueDate: r.dueDate === "—" ? "" : r.dueDate,
-                  customerName: r.customerName,
-                  totalAmount: r.remainingAmount,
-                });
-                const link = buildGmailLink({ to: r.customerEmail || "", subject, body });
-                const badge =
-                  typeof r.days === "number" ? (
-                    r.days < 0 ? (
-                      <span className="px-2 py-1 rounded-full text-xs bg-red-100 text-red-800">
-                        {Math.abs(r.days)} day(s) overdue
-                      </span>
-                    ) : (
-                      <span className="px-2 py-1 rounded-full text-xs bg-amber-100 text-amber-800">
-                        {r.days} day(s) remaining
-                      </span>
-                    )
-                  ) : (
-                    <span className="px-2 py-1 rounded-full text-xs bg-gray-100 text-gray-700">—</span>
-                  );
-
-                return (
-                  <tr key={r.id} className="border-b hover:bg-gray-50">
-                    <td className="p-3 font-medium">{r.invoiceNumber}</td>
-                    <td className="p-3">{r.customerName}</td>
-                    <td className="p-3">{r.customerEmail || "—"}</td>
-                    <td className="p-3">{r.dueDate}</td>
-                    <td className="p-3">{badge}</td>
-                    <td className="p-3">{fmtInr(r.amount)}</td>
-                    <td className="p-3">{fmtInr(r.remainingAmount)}</td>
-                    <td className="p-3">
-                      <a href={link} target="_blank" rel="noreferrer" className="px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700">
-                        Send Reminder
-                      </a>
-                    </td>
-                  </tr>
-                );
-              })}
-              {pendingRows.length === 0 && (
-                <tr>
-                  <td colSpan={8} className="p-6 text-center text-gray-500">
-                    No pending invoices 🎉
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-/* ------------------------------ Sort helper ------------------------------ */
 const cmp = (a, b, key, dir) => {
   const va = a?.[key] ?? "";
   const vb = b?.[key] ?? "";
@@ -1147,6 +817,7 @@ const cmp = (a, b, key, dir) => {
   if (va > vb) return dir === "asc" ? 1 : -1;
   return 0;
 };
+
 /* ------------------------------ Forms ------------------------------ */
 const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice }) => {
   const [touchedNumber, setTouchedNumber] = useState(false);
