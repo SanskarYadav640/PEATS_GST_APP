@@ -857,12 +857,26 @@ const CustomerListView = ({ customers, onEdit, onDelete }) => {
 
 /* ------------------------------ Reports ------------------------------ */
 const ReportsView = ({ invoices, customers, xlsxReady }) => {
+  // Totals: fully-paid counts in full, paid-half counts only the paid portion as received,
+  // remaining is the unpaid portion across all non-paid invoices.
   const totals = useMemo(() => {
-    const received = invoices.filter((i) => i.status === "paid").reduce((s, i) => s + safeNum(i.totalAmount), 0);
-    const remaining = invoices.filter((i) => i.status !== "paid").reduce((s, i) => s + safeNum(i.totalAmount), 0);
+    const received = invoices.reduce((s, i) => {
+      if (i.status === "paid") return s + safeNum(i.totalAmount);
+      if (i.status === "paid-half") return s + Math.min(safeNum(i.totalAmount), safeNum(i.amountPaid || 0));
+      return s;
+    }, 0);
+
+    const remaining = invoices.reduce((s, i) => {
+      if (i.status === "paid") return s;
+      const paid = i.status === "paid-half" ? safeNum(i.amountPaid || 0) : 0;
+      const rem = Math.max(0, safeNum(i.totalAmount) - paid);
+      return s + rem;
+    }, 0);
+
     return { received: round2(received), remaining: round2(remaining) };
   }, [invoices]);
 
+  // Rows of pending invoices (include paid-half with remaining > 0), sorted by aging
   const pendingRows = useMemo(() => {
     return invoices
       .filter((i) => i.status !== "paid")
@@ -873,35 +887,45 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
           const c = customers.find((x) => x.id === i.customerId);
           email = c?.email || "";
         }
+        const paid = i.status === "paid-half" ? safeNum(i.amountPaid || 0) : 0;
+        const remaining = round2(Math.max(0, safeNum(i.totalAmount) - paid));
         return {
           id: i.id,
           invoiceNumber: i.invoiceNumber,
           customerName: i.customerName,
           customerEmail: email,
           dueDate: i.dueDate || "—",
-          amount: round2(safeNum(i.totalAmount)),
+          amountRemaining: remaining,
+          amountPaid: round2(paid),
           days: d,
+          status: i.status,
         };
       })
+      .filter((r) => r.amountRemaining > 0)
       .sort((a, b) => {
-        const da = a.days ?? 9999, db = b.days ?? 9999;
+        const da = a.days ?? 9999;
+        const db = b.days ?? 9999;
         return da - db; // most overdue first
       });
   }, [invoices, customers]);
 
-  // Client summary (pending totals per customer)
+  // Client summary: remaining per customer (sums remaining across their non-paid invoices)
   const clientSummary = useMemo(() => {
     const map = new Map();
     invoices.forEach((i) => {
       if (i.status === "paid") return;
+      const paid = i.status === "paid-half" ? safeNum(i.amountPaid || 0) : 0;
+      const remaining = Math.max(0, safeNum(i.totalAmount) - paid);
+      if (remaining <= 0) return;
+
       const key = i.customerId || i.customerName || "—";
       const email = i.customerEmail || customers.find((c) => c.id === i.customerId)?.email || "";
-      const prev = map.get(key) || { customerName: i.customerName || "—", email, totalPending: 0, invoices: [] };
-      prev.totalPending += safeNum(i.totalAmount);
+      const prev = map.get(key) || { customerName: i.customerName || "—", email, totalRemaining: 0, invoices: [] };
+      prev.totalRemaining += remaining;
       prev.invoices.push(i);
       map.set(key, prev);
     });
-    return Array.from(map.values()).sort((a, b) => b.totalPending - a.totalPending);
+    return Array.from(map.values()).sort((a, b) => b.totalRemaining - a.totalRemaining);
   }, [invoices, customers]);
 
   function summaryEmailPayload(entry) {
@@ -918,10 +942,12 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
               ? `${Math.abs(days)} day(s) overdue`
               : `${days} day(s) remaining`
             : "No due date";
-        return `• ${inv.invoiceNumber} — ${fmtInr(inv.totalAmount)} — Due: ${inv.dueDate || "—"} (${aging})`;
+        const paid = inv.status === "paid-half" ? safeNum(inv.amountPaid || 0) : 0;
+        const remaining = Math.max(0, safeNum(inv.totalAmount) - paid);
+        return `• ${inv.invoiceNumber} — Remaining: ${fmtInr(remaining)} — Due: ${inv.dueDate || "—"} (${aging})`;
       }),
       "",
-      `Total pending: ${fmtInr(entry.totalPending)}`,
+      `Total pending: ${fmtInr(round2(entry.totalRemaining))}`,
       "",
       "Kindly arrange the payment at your earliest convenience.",
       "",
@@ -947,6 +973,7 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
         <StatCard title="Amount Remaining" value={fmtInr(totals.remaining)} />
       </div>
 
+      {/* Client summary */}
       <div>
         <h3 className="font-semibold mb-2">Client Summary (Pending)</h3>
         <div className="overflow-x-auto">
@@ -967,7 +994,7 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
                   <tr key={idx} className="border-b hover:bg-gray-50">
                     <td className="p-3">{entry.customerName}</td>
                     <td className="p-3">{entry.email || "—"}</td>
-                    <td className="p-3">{fmtInr(entry.totalPending)}</td>
+                    <td className="p-3">{fmtInr(round2(entry.totalRemaining))}</td>
                     <td className="p-3">
                       <a href={link} target="_blank" rel="noreferrer" className="px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700">
                         Send Summary
@@ -986,6 +1013,7 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
         </div>
       </div>
 
+      {/* Pending invoices with per-invoice remaining */}
       <div>
         <h3 className="font-semibold mb-2">Pending Invoices (Aging & Reminders)</h3>
         <div className="overflow-x-auto">
@@ -997,7 +1025,7 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
                 <th className="p-3">Email</th>
                 <th className="p-3">Due Date</th>
                 <th className="p-3">Days</th>
-                <th className="p-3">Amount</th>
+                <th className="p-3">Remaining</th>
                 <th className="p-3">Reminder</th>
               </tr>
             </thead>
@@ -1007,9 +1035,10 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
                   invoiceNumber: r.invoiceNumber,
                   dueDate: r.dueDate === "—" ? "" : r.dueDate,
                   customerName: r.customerName,
-                  totalAmount: r.amount,
+                  totalAmount: r.amountRemaining, // email shows remaining due
                 });
                 const link = buildGmailLink({ to: r.customerEmail || "", subject, body });
+
                 const badge =
                   typeof r.days === "number" ? (
                     r.days < 0 ? (
@@ -1027,12 +1056,17 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
 
                 return (
                   <tr key={r.id} className="border-b hover:bg-gray-50">
-                    <td className="p-3 font-medium">{r.invoiceNumber}</td>
+                    <td className="p-3 font-medium">
+                      {r.invoiceNumber}
+                      {r.status === "paid-half" && (
+                        <span className="ml-2 text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">Paid-Half</span>
+                      )}
+                    </td>
                     <td className="p-3">{r.customerName}</td>
                     <td className="p-3">{r.customerEmail || "—"}</td>
                     <td className="p-3">{r.dueDate}</td>
                     <td className="p-3">{badge}</td>
-                    <td className="p-3">{fmtInr(r.amount)}</td>
+                    <td className="p-3">{fmtInr(r.amountRemaining)}</td>
                     <td className="p-3">
                       <a href={link} target="_blank" rel="noreferrer" className="px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700">
                         Send Reminder
@@ -1055,6 +1089,7 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
     </div>
   );
 };
+
 /* ------------------------------ Forms ------------------------------ */
 const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice }) => {
   const [touchedNumber] = useState(false); // kept but unused since number is read-only now
