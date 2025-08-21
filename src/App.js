@@ -8,6 +8,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
  */
 
 /* ------------------------------ Utils & Constants ------------------------------ */
+
 const CURRENCY = new Intl.NumberFormat("en-IN", {
   style: "currency",
   currency: "INR",
@@ -27,7 +28,14 @@ function addDaysISO(isoStr, days) {
 }
 
 const GSTIN_REGEX = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/i;
-const GST_RATES = [2.5, 5, 8, 9, 18, 28];
+const GST_RATES = [2.5, 5, 8, 9, 18, 28]; // make sure this matches everywhere
+
+function addDaysISO(isoStr, days) {
+  const base = isoStr ? new Date(isoStr) : new Date();
+  if (Number.isNaN(+base)) return todayISO();
+  base.setDate(base.getDate() + Number(days || 0));
+  return base.toISOString().split("T")[0];
+}
 
 const calcItem = (item) => {
   const qty = Math.max(0, safeNum(item.quantity));
@@ -117,9 +125,9 @@ function nextInvoiceNumberForDate(dateStr, existingInvoices = []) {
 /* ------------------------------ Company Details ------------------------------ */
 const companyDetails = {
   name: "ParthaSarthi Engineering and Training Services (PEATS)",
-  phone: "7617001477, 9889031719",
+  phone: "7617001477", // removed 9889031719
   email: "Parthasarthiconsultancy@gmail.com",
-  owners: "Mr. Ramkaran Yadav & Mr. Ajay Shankar Amist",
+  owners: "Mr. Ramkaran Yadav", // removed Mr. Ajay Shankar Amist
   address:
     "Tower 3, Goldfinch, Paarth Republic, Kanpur Road, Miranpur, Pinvat, Banthra, Sikandarpur, Post- Banthra Dist. - Lucknow, Pin- 226401",
 };
@@ -1049,7 +1057,7 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
 };
 /* ------------------------------ Forms ------------------------------ */
 const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice }) => {
-  const [touchedNumber, setTouchedNumber] = useState(false);
+  const [touchedNumber] = useState(false); // kept but unused since number is read-only now
   const [invoice, setInvoice] = useState(() => {
     const initDate = existingInvoice?.invoiceDate || todayISO();
     const defaultNumber = existingInvoice?.invoiceNumber || nextInvoiceNumberForDate(initDate, allInvoices);
@@ -1087,15 +1095,15 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
             },
           ],
       status: existingInvoice?.status || "pending",
+      amountPaid: safeNum(existingInvoice?.amountPaid || 0),
     };
   });
 
-  // Auto regenerate # and due date when invoice date changes (only for new & untouched #)
+  // Auto-update due date when invoice date changes (only for new invoices)
   useEffect(() => {
     if (existingInvoice?.id) return;
     if (touchedNumber) return;
-    const next = nextInvoiceNumberForDate(invoice.invoiceDate, allInvoices);
-    setInvoice((prev) => ({ ...prev, invoiceNumber: next, dueDate: addDaysISO(invoice.invoiceDate, 45) }));
+    setInvoice((prev) => ({ ...prev, dueDate: addDaysISO(prev.invoiceDate, 45) }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [invoice.invoiceDate, allInvoices]);
 
@@ -1104,6 +1112,7 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
     sum(invoice.items.map(calcItem), "cgstAmt") + sum(invoice.items.map(calcItem), "sgstAmt") + sum(invoice.items.map(calcItem), "igstAmt")
   );
   const totalAmount = round2(subTotal + totalTax);
+  const remainingAmount = round2(Math.max(0, totalAmount - safeNum(invoice.amountPaid)));
 
   const onSelectCustomer = (e) => {
     const c = customers.find((x) => x.id === e.target.value);
@@ -1176,14 +1185,55 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
 
   const removeItem = (idx) => setInvoice((prev) => ({ ...prev, items: prev.items.filter((_, i) => i !== idx) }));
 
+  function validateBeforeSave() {
+    // Required: dates
+    if (!invoice.invoiceDate || !invoice.dueDate) {
+      alert("Please select Invoice Date and Due Date.");
+      return false;
+    }
+    // Required: customer core details
+    if (!invoice.customerName?.trim()) {
+      alert("Customer name is required.");
+      return false;
+    }
+    if (!invoice.customerAddress?.trim()) {
+      alert("Customer address is required.");
+      return false;
+    }
+    if (!invoice.customerEmail?.trim()) {
+      alert("Customer email is required.");
+      return false;
+    }
+    // Items: at least one valid line
+    const hasValidItem = invoice.items.some(
+      (it) => it.description?.trim() && safeNum(it.quantity) > 0 && safeNum(it.rate) > 0
+    );
+    if (!hasValidItem) {
+      alert("Add at least one item with description, quantity > 0, and rate > 0.");
+      return false;
+    }
+    // Paid-Half requires amountPaid
+    if (invoice.status === "paid-half") {
+      if (!(safeNum(invoice.amountPaid) > 0)) {
+        alert("Please enter the Amount Paid for Paid-Half invoices.");
+        return false;
+      }
+      if (safeNum(invoice.amountPaid) >= totalAmount) {
+        alert("Amount Paid must be less than the Grand Total for Paid-Half.");
+        return false;
+      }
+    }
+    // (Optional) Validate GSTIN if present
+    if (invoice.customerGstin && !GSTIN_REGEX.test(invoice.customerGstin)) {
+      if (!window.confirm("Customer GSTIN does not look valid. Save anyway?")) return false;
+    }
+    return true;
+  }
+
   const submit = (e) => {
     e.preventDefault();
-    if (!invoice.invoiceNumber) return alert("Invoice # is required");
-    if (!invoice.customerName) return alert("Customer name is required");
-    if (invoice.customerGstin && !GSTIN_REGEX.test(invoice.customerGstin)) {
-      if (!window.confirm("GSTIN does not look valid. Save anyway?")) return;
-    }
-    onSave({ ...invoice, totalAmount });
+    if (!validateBeforeSave()) return;
+    onSave({ ...invoice, totalAmount, amountPaid: safeNum(invoice.amountPaid) });
   };
 
   const poGrossValue = round2(safeNum(invoice.poBaseValue || 0) * (1 + safeNum(invoice.poGstRate || 0) / 100));
@@ -1199,11 +1249,9 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
           <label className="mb-1 block text-sm text-gray-600">Invoice #</label>
           <input
             value={invoice.invoiceNumber}
-            onChange={(e) => {
-              setTouchedNumber(true);
-              setInvoice({ ...invoice, invoiceNumber: e.target.value });
-            }}
-            className="p-2 border rounded-lg w-full"
+            readOnly
+            className="p-2 border rounded-lg w-full bg-gray-100 cursor-not-allowed"
+            title="Auto-generated and locked"
             required
           />
           <p className="text-xs text-gray-500 mt-1">
@@ -1217,7 +1265,7 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
           onChange={(e) => setInvoice({ ...invoice, invoiceDate: e.target.value, dueDate: addDaysISO(e.target.value, 45) })}
           required
         />
-        <Input label="Due Date" type="date" value={invoice.dueDate} onChange={(e) => setInvoice({ ...invoice, dueDate: e.target.value })} />
+        <Input label="Due Date" type="date" value={invoice.dueDate} onChange={(e) => setInvoice({ ...invoice, dueDate: e.target.value })} required />
       </div>
 
       <div className="border-t pt-4">
@@ -1235,9 +1283,10 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
             </select>
           </div>
           <Input label="Customer Name" value={invoice.customerName} onChange={(e) => setInvoice({ ...invoice, customerName: e.target.value })} required />
-          <Input label="Customer Address" value={invoice.customerAddress} onChange={(e) => setInvoice({ ...invoice, customerAddress: e.target.value })} />
-          <Input label="Customer GSTIN" value={invoice.customerGstin} onChange={(e) => setInvoice({ ...invoice, customerGstin: e.target.value.toUpperCase() })} />
-          <Input label="Customer Email" value={invoice.customerEmail} onChange={(e) => setInvoice({ ...invoice, customerEmail: e.target.value })} />
+          <Input label="Customer Address" value={invoice.customerAddress} onChange={(e) => setInvoice({ ...invoice, customerAddress: e.target.value })} required />
+          {/* Keep default format; no toUpperCase */}
+          <Input label="Customer GSTIN" value={invoice.customerGstin} onChange={(e) => setInvoice({ ...invoice, customerGstin: e.target.value })} />
+          <Input label="Customer Email" value={invoice.customerEmail} onChange={(e) => setInvoice({ ...invoice, customerEmail: e.target.value })} required />
         </div>
       </div>
 
@@ -1245,7 +1294,7 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
       <div className="border-t pt-4">
         <h3 className="text-lg font-semibold mb-3">PO & Status</h3>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <Input label="PO Number" value={invoice.poNumber} onChange={(e) => setInvoice({ ...invoice, poNumber: e.target.value })} />
+          <Input label="Against PO Number" value={invoice.poNumber} onChange={(e) => setInvoice({ ...invoice, poNumber: e.target.value })} />
           <div>
             <label className="mb-1 block text-sm text-gray-600">PO Image (PNG/JPG)</label>
             <input
@@ -1261,9 +1310,18 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
               className="p-2 border rounded-lg w-full bg-white"
             />
             {invoice.poImage && (
-              <a href={invoice.poImage} target="_blank" rel="noreferrer" className="text-indigo-600 text-sm mt-1 inline-block">
-                Preview PO Image
-              </a>
+              <div className="mt-2 space-y-1">
+                <img
+                  src={invoice.poImage}
+                  alt="PO"
+                  className="max-h-32 rounded border"
+                />
+                <div>
+                  <a href={invoice.poImage} target="_blank" rel="noreferrer" className="text-indigo-600 text-sm inline-block underline">
+                    View full size
+                  </a>
+                </div>
+              </div>
             )}
           </div>
           <div>
@@ -1388,6 +1446,29 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
         </button>
       </div>
 
+      {/* Paid-Half capture */}
+      {invoice.status === "paid-half" && (
+        <div className="border-t pt-4">
+          <h3 className="text-lg font-semibold mb-3">Payment (Half)</h3>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+            <Input
+              label="Amount Paid"
+              type="number"
+              value={invoice.amountPaid}
+              onChange={(e) => setInvoice({ ...invoice, amountPaid: safeNum(e.target.value) })}
+              required
+            />
+            <div>
+              <label className="mb-1 block text-sm text-gray-600">Remaining (Auto)</label>
+              <input readOnly value={remainingAmount} className="p-2 border rounded-lg w-full bg-gray-50" />
+            </div>
+            <div className="text-sm text-gray-500">
+              Grand Total: <strong>{fmtInr(totalAmount)}</strong>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Totals */}
       <div className="border-t pt-4 space-y-2">
         <div className="flex justify-between text-sm">
@@ -1417,36 +1498,6 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
   );
 };
 
-const CustomerForm = ({ onSave, onCancel, existingCustomer }) => {
-  const [c, setC] = useState(() => existingCustomer || { id: null, name: "", email: "", phone: "", address: "", gstin: "" });
-
-  const submit = (e) => {
-    e.preventDefault();
-    if (!c.name) return alert("Name is required");
-    if (c.gstin && !GSTIN_REGEX.test(c.gstin)) {
-      if (!window.confirm("GSTIN does not look valid. Save anyway?")) return;
-    }
-    onSave(c);
-  };
-
-  return (
-    <form onSubmit={submit} className="bg-white p-6 rounded-xl shadow space-y-4">
-      <Input label="Customer Name" value={c.name} onChange={(e) => setC({ ...c, name: e.target.value })} required />
-      <Input label="Email" value={c.email} onChange={(e) => setC({ ...c, email: e.target.value })} />
-      <Input label="Phone" value={c.phone} onChange={(e) => setC({ ...c, phone: e.target.value })} />
-      <Input label="Address" value={c.address} onChange={(e) => setC({ ...c, address: e.target.value })} />
-      <Input label="GSTIN" value={c.gstin} onChange={(e) => setC({ ...c, gstin: e.target.value.toUpperCase() })} />
-      <div className="flex justify-end gap-3">
-        <button type="button" onClick={onCancel} className="px-4 py-2 bg-gray-200 rounded">
-          Cancel
-        </button>
-        <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded">
-          Save
-        </button>
-      </div>
-    </form>
-  );
-};
 
 /* ------------------------------ Shared Helpers ------------------------------ */
 const Input = ({ label, ...props }) => (
