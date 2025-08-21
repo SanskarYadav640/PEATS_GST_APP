@@ -402,51 +402,63 @@ const CustomerListView = ({ customers, onEdit, onDelete }) => {
 const ReportsView = ({ invoices, customers }) => {
     const exportToExcel = () => {
         if (typeof XLSX === 'undefined') {
+            console.error('Excel library (XLSX) is not loaded yet.');
             alert('Excel library is loading. Please try again in a moment.');
             return;
         }
 
-        const worksheetData = invoices.flatMap(invoice => 
-            (invoice.items || []).map(item => ({
-                'Invoice ID': invoice.id,
-                'Invoice #': invoice.invoiceNumber,
-                'Invoice Date': invoice.invoiceDate,
-                'Due Date': invoice.dueDate,
-                'Customer ID': invoice.customerId,
-                'Customer Name': invoice.customerName,
-                'Customer Address': invoice.customerAddress,
-                'Customer GSTIN': invoice.customerGstin,
-                'Item Description': item.description,
-                'HSN/SAC': item.hsn,
-                'Quantity': item.quantity,
-                'Rate': item.rate,
-                'Taxable Value': item.quantity * item.rate,
-                'CGST Rate (%)': item.cgst,
-                'CGST Amount': (item.quantity * item.rate * item.cgst) / 100,
-                'SGST Rate (%)': item.sgst,
-                'SGST Amount': (item.quantity * item.rate * item.sgst) / 100,
-                'IGST Rate (%)': item.igst,
-                'IGST Amount': (item.quantity * item.rate * item.igst) / 100,
-                'Total Item Value': item.total,
-                'Freight Charges': invoice.freightCharges || 0,
-                'Invoice Total': invoice.totalAmount,
-                'Amount Paid': invoice.amountPaid || 0,
-                'Remaining Amount': (invoice.totalAmount || 0) - (invoice.amountPaid || 0),
-            }))
-        );
+        try {
+            const worksheetData = invoices.flatMap(invoice => 
+                (invoice.items || []).map(item => ({
+                    'Invoice ID': invoice.id,
+                    'Invoice #': invoice.invoiceNumber,
+                    'Invoice Date': invoice.invoiceDate,
+                    'Due Date': invoice.dueDate,
+                    'Customer ID': invoice.customerId,
+                    'Customer Name': invoice.customerName,
+                    'Customer Address': invoice.customerAddress,
+                    'Customer GSTIN': invoice.customerGstin,
+                    'Item Description': item.description,
+                    'HSN/SAC': item.hsn,
+                    'Quantity': item.quantity,
+                    'Rate': item.rate,
+                    'Taxable Value': item.quantity * item.rate,
+                    'CGST Rate (%)': item.cgst,
+                    'CGST Amount': (item.quantity * item.rate * item.cgst) / 100,
+                    'SGST Rate (%)': item.sgst,
+                    'SGST Amount': (item.quantity * item.rate * item.sgst) / 100,
+                    'IGST Rate (%)': item.igst,
+                    'IGST Amount': (item.quantity * item.rate * item.igst) / 100,
+                    'Total Item Value': item.total,
+                    'Freight Charges': invoice.freightCharges || 0,
+                    'Invoice Total': invoice.totalAmount,
+                    'Amount Paid': invoice.amountPaid || 0,
+                    'Remaining Amount': (invoice.totalAmount || 0) - (invoice.amountPaid || 0),
+                }))
+            );
 
-        const worksheet = XLSX.utils.json_to_sheet(worksheetData);
-        const workbook = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(workbook, worksheet, "Invoices");
-        const excelBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
-        const data = new Blob([excelBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;charset=UTF-8' });
-        const url = URL.createObjectURL(data);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = 'PEATS_Master_Invoice_Data.xlsx';
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
+            const worksheet = XLSX.utils.json_to_sheet(worksheetData);
+            const workbook = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(workbook, worksheet, "Invoices");
+            const excelBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+            const data = new Blob([excelBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;charset=UTF-8' });
+            
+            const url = URL.createObjectURL(data);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = 'PEATS_Master_Invoice_Data.xlsx';
+            document.body.appendChild(link);
+            link.click();
+            
+            setTimeout(() => {
+                document.body.removeChild(link);
+                window.URL.revokeObjectURL(url);
+            }, 100);
+
+        } catch (error) {
+            console.error("Error exporting to Excel:", error);
+            alert("An error occurred while creating the Excel file.");
+        }
     };
 
     const handleSendReminder = (invoice, customer, remainingAmount, dueDays) => {
