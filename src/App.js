@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 
+/* global XLSX */
+
 // --- Main App Component ---
 export default function App() {
     // All data is now stored in the browser's memory (React state).
