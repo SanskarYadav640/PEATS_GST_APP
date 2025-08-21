@@ -1122,8 +1122,8 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
 };
 
 /* ------------------------------ Forms ------------------------------ */
+/* ------------------------------ Forms ------------------------------ */
 const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice }) => {
-  const [touchedNumber] = useState(false); // number is locked now
   const [invoice, setInvoice] = useState(() => {
     const initDate = existingInvoice?.invoiceDate || todayISO();
     const defaultNumber = existingInvoice?.invoiceNumber || nextInvoiceNumberForDate(initDate, allInvoices);
@@ -1164,6 +1164,15 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
       paidHalfAmount: safeNum(existingInvoice?.paidHalfAmount || 0),
     };
   });
+
+  // Auto-set number & due date for new invoices when date changes (number is readOnly anyway)
+  useEffect(() => {
+    if (existingInvoice?.id) return;
+    const next = nextInvoiceNumberForDate(invoice.invoiceDate, allInvoices);
+    setInvoice((prev) => ({ ...prev, invoiceNumber: next, dueDate: addDaysISO(invoice.invoiceDate, 45) }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [invoice.invoiceDate, allInvoices]);
+
 
   // Auto-set number & due date for new invoices when date changes (number is readOnly anyway)
   useEffect(() => {
