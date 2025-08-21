@@ -3,13 +3,11 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 /* global XLSX */
 
 /**
- * PEATS — GST Invoice System (Half-corrected build-ready)
- * - Fixes: CustomerForm & generatePrintableInvoice defined
- * - Adds: addDaysISO helper, Paid-Half status, 45d due date auto, PO block with GST
- * - Updates: GST_RATES to [2.5, 5, 8, 9, 18, 28]
- * - Removes: Clear Local Data button (as requested)
+ * PEATS — GST Invoice System
+ * (Single-file App.js build)
  */
 
+/* ------------------------------ Utils & Constants ------------------------------ */
 const CURRENCY = new Intl.NumberFormat("en-IN", {
   style: "currency",
   currency: "INR",
@@ -29,7 +27,6 @@ function addDaysISO(isoStr, days) {
 }
 
 const GSTIN_REGEX = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/i;
-// UPDATED per your spec:
 const GST_RATES = [2.5, 5, 8, 9, 18, 28];
 
 const calcItem = (item) => {
@@ -50,7 +47,7 @@ function daysUntilDue(dueISO) {
   const start = new Date(todayISO());
   start.setHours(0, 0, 0, 0);
   due.setHours(0, 0, 0, 0);
-  const diffMs = due - start;
+  const diffMs = due - start; // positive => remaining, negative => overdue
   return Math.round(diffMs / (1000 * 60 * 60 * 24));
 }
 
@@ -68,7 +65,9 @@ function formatReminderEmail(inv) {
   const days = daysUntilDue(inv.dueDate);
   const duePart = inv.dueDate
     ? ` (Due Date: ${inv.dueDate}${
-        typeof days === "number" ? `, ${days < 0 ? `${Math.abs(days)} day(s) overdue` : `${days} day(s) remaining`}` : ""
+        typeof days === "number"
+          ? `, ${days < 0 ? `${Math.abs(days)} day(s) overdue` : `${days} day(s) remaining`}`
+          : ""
       })`
     : "";
   const lines = [
@@ -192,7 +191,7 @@ export default function App() {
     };
   }, []);
 
-  // Persist
+  // Persist to localStorage
   useEffect(() => saveLS(LS_KEYS.invoices, invoices), [invoices]);
   useEffect(() => saveLS(LS_KEYS.customers, customers), [customers]);
 
@@ -224,6 +223,7 @@ export default function App() {
     if (type === "customer") setCustomers((prev) => prev.filter((c) => c.id !== id));
   };
 
+  // Quick in-place invoice updater (for inline status change)
   const quickUpdateInvoice = (patched) => {
     setInvoices((prev) => prev.map((x) => (x.id === patched.id ? patched : x)));
   };
@@ -340,7 +340,7 @@ const Sidebar = ({ currentView, setView }) => {
           </li>
         ))}
       </ul>
-      <div className="p-4 text-xs text-gray-400">v1.5-half</div>
+      <div className="p-4 text-xs text-gray-400">v1.5</div>
     </nav>
   );
 };
@@ -383,9 +383,7 @@ const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxRea
 
   const totals = useMemo(() => {
     const totalRevenue = sum(invoices, "totalAmount");
-    const outstanding = invoices
-      .filter((inv) => inv.status !== "paid")
-      .reduce((acc, inv) => acc + safeNum(inv.totalAmount), 0);
+    const outstanding = invoices.filter((inv) => inv.status !== "paid").reduce((acc, inv) => acc + safeNum(inv.totalAmount), 0);
     return { totalRevenue, outstanding };
   }, [invoices]);
 
@@ -424,6 +422,9 @@ const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxRea
               status: String(row["Invoice Status"] ?? row["status"] ?? "pending").toLowerCase(),
               poNumber: row["PO Number"] ?? row["po_number"] ?? "",
               poImage: row["PO Image"] ?? row["po_image"] ?? "",
+              poBaseValue: safeNum(row["PO Base Value"] ?? row["po_base_value"] ?? 0),
+              poGstMode: row["PO GST Mode"] ?? row["po_gst_mode"] ?? "cgst_sgst",
+              poGstRate: safeNum(row["PO GST %"] ?? row["po_gst_rate"] ?? 18),
               totalAmount: safeNum(row["Invoice Total"] ?? row["invoice_total"] ?? 0),
               items: [],
             };
@@ -490,7 +491,7 @@ const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxRea
           <input type="file" ref={fileRef} onChange={importExcel} className="hidden" accept=".xlsx,.xls" />
           <ExportExcelButton invoices={invoices} disabled={!xlsxReady} />
           <ExportJsonButton invoices={invoices} customers={customers} />
-          {/* ClearDataButton removed as requested */}
+          {/* Clear Local Data removed as requested */}
         </div>
       </div>
 
@@ -533,13 +534,15 @@ const ExportExcelButton = ({ invoices, disabled }) => {
           "Invoice Status": invoice.status,
           "PO Number": invoice.poNumber || "",
           "PO Image": invoice.poImage || "",
+          "PO Base Value": round2(invoice.poBaseValue || 0),
+          "PO GST Mode": invoice.poGstMode || "cgst_sgst",
+          "PO GST %": round2(invoice.poGstRate ?? 0),
           "Item Description": item.description,
           "HSN/SAC": item.hsn,
           Quantity: item.quantity,
           Rate: item.rate,
           "GST Mode": item.gstMode || (safeNum(item.igst) > 0 ? "igst" : "cgst_sgst"),
-          "GST %":
-            item.gstRate ?? (safeNum(item.igst) > 0 ? safeNum(item.igst) : safeNum(item.cgst) + safeNum(item.sgst)),
+          "GST %": item.gstRate ?? (safeNum(item.igst) > 0 ? safeNum(item.igst) : safeNum(item.cgst) + safeNum(item.sgst)),
           "Taxable Value": taxable,
           "CGST Rate (%)": item.cgst,
           "CGST Amount": cgstAmt,
@@ -609,7 +612,6 @@ const ExportJsonButton = ({ invoices, customers }) => {
     </button>
   );
 };
-
 /* ------------------------------ Invoices List ------------------------------ */
 const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate, onQuickUpdate }) => {
   const [query, setQuery] = useState("");
@@ -681,7 +683,6 @@ const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate, onQuickUpdat
               className="pl-9 pr-3 py-2 border rounded-lg w-72 max-w-full"
             />
           </div>
-          {/* Added Paid-Half filter option */}
           <select value={status} onChange={(e) => setStatus(e.target.value)} className="border rounded-lg px-3 py-2">
             <option value="all">All</option>
             <option value="pending">Pending</option>
@@ -722,11 +723,7 @@ const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate, onQuickUpdat
                       value={inv.status}
                       onChange={(e) => onQuickUpdate({ ...inv, status: e.target.value })}
                       className={`px-2 py-1 border rounded-lg ${
-                        inv.status === "paid"
-                          ? "bg-green-50 text-green-700"
-                          : inv.status === "paid-half"
-                          ? "bg-blue-50 text-blue-700"
-                          : "bg-amber-50 text-amber-700"
+                        inv.status === "paid" ? "bg-green-50 text-green-700" : inv.status === "paid-half" ? "bg-blue-50 text-blue-700" : "bg-amber-50 text-amber-700"
                       }`}
                     >
                       <option value="pending">Pending</option>
@@ -739,9 +736,7 @@ const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate, onQuickUpdat
                       <IconBtn title="Edit" onClick={() => onEdit(inv)} icon={ICONS.edit} className="text-blue-600 hover:bg-blue-50" />
                       <IconBtn title="Duplicate" onClick={() => onDuplicate(inv)} icon={ICONS.duplicate} className="text-purple-600 hover:bg-purple-50" />
                       <IconBtn title="Delete" onClick={() => handleDelete(inv.id)} icon={ICONS.delete} className="text-red-600 hover:bg-red-50" />
-                      <a href={mailto} target="_blank" rel="noreferrer" title="Send Reminder" className="p-2 rounded-lg text-amber-700 hover:bg-amber-50">
-                        ✉
-                      </a>
+                      <a href={mailto} target="_blank" rel="noreferrer" title="Send Reminder" className="p-2 rounded-lg text-amber-700 hover:bg-amber-50">✉</a>
                       <IconBtn title="Print" onClick={() => handlePrint(inv)} icon={ICONS.print} className="text-gray-700 hover:bg-gray-100" />
                     </div>
                   </td>
@@ -788,35 +783,6 @@ const IconBtn = ({ onClick, icon, title, className = "" }) => (
   </button>
 );
 
-/* ------------------------------ Shared Helpers ------------------------------ */
-const Input = ({ label, ...props }) => (
-  <div>
-    <label className="mb-1 block text-sm text-gray-600">{label}</label>
-    <input {...props} className={`p-2 border rounded-lg w-full ${props.className || ""}`} />
-  </div>
-);
-
-const loadLS = (key, fallback) => {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch {
-    return fallback;
-  }
-};
-const saveLS = (key, val) => {
-  try {
-    localStorage.setItem(key, JSON.stringify(val));
-  } catch {}
-};
-
-const cmp = (a, b, key, dir) => {
-  const va = a?.[key] ?? "";
-  const vb = b?.[key] ?? "";
-  if (va < vb) return dir === "asc" ? -1 : 1;
-  if (va > vb) return dir === "asc" ? 1 : -1;
-  return 0;
-};
 /* ------------------------------ Customers ------------------------------ */
 const CustomerListView = ({ customers, onEdit, onDelete }) => {
   const [query, setQuery] = useState("");
@@ -881,7 +847,7 @@ const CustomerListView = ({ customers, onEdit, onDelete }) => {
   );
 };
 
-/* ------------------------------ Reports (base; client summary comes in final step) ------------------------------ */
+/* ------------------------------ Reports ------------------------------ */
 const ReportsView = ({ invoices, customers, xlsxReady }) => {
   const totals = useMemo(() => {
     const received = invoices.filter((i) => i.status === "paid").reduce((s, i) => s + safeNum(i.totalAmount), 0);
@@ -915,6 +881,52 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
       });
   }, [invoices, customers]);
 
+  // Client summary (pending totals per customer)
+  const clientSummary = useMemo(() => {
+    const map = new Map();
+    invoices.forEach((i) => {
+      if (i.status === "paid") return;
+      const key = i.customerId || i.customerName || "—";
+      const email = i.customerEmail || customers.find((c) => c.id === i.customerId)?.email || "";
+      const prev = map.get(key) || { customerName: i.customerName || "—", email, totalPending: 0, invoices: [] };
+      prev.totalPending += safeNum(i.totalAmount);
+      prev.invoices.push(i);
+      map.set(key, prev);
+    });
+    return Array.from(map.values()).sort((a, b) => b.totalPending - a.totalPending);
+  }, [invoices, customers]);
+
+  function summaryEmailPayload(entry) {
+    const lines = [
+      `Dear ${entry.customerName || "Sir/Madam"},`,
+      "",
+      "This is a friendly reminder of your pending payments with us:",
+      "",
+      ...entry.invoices.map((inv) => {
+        const days = daysUntilDue(inv.dueDate);
+        const aging =
+          typeof days === "number"
+            ? days < 0
+              ? `${Math.abs(days)} day(s) overdue`
+              : `${days} day(s) remaining`
+            : "No due date";
+        return `• ${inv.invoiceNumber} — ${fmtInr(inv.totalAmount)} — Due: ${inv.dueDate || "—"} (${aging})`;
+      }),
+      "",
+      `Total pending: ${fmtInr(entry.totalPending)}`,
+      "",
+      "Kindly arrange the payment at your earliest convenience.",
+      "",
+      "Best regards,",
+      "ParthaSarthi Engineering and Training Services (PEATS)",
+      "parthasarthiconsultancy@gmail.com",
+    ];
+    return {
+      subject: "Payment Reminder — Pending Invoices Summary",
+      body: lines.join("\n"),
+    };
+  }
+
   return (
     <div className="bg-white p-5 rounded-xl shadow space-y-6">
       <div className="flex items-center justify-between">
@@ -925,6 +937,45 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <StatCard title="Amount Received" value={fmtInr(totals.received)} />
         <StatCard title="Amount Remaining" value={fmtInr(totals.remaining)} />
+      </div>
+
+      <div>
+        <h3 className="font-semibold mb-2">Client Summary (Pending)</h3>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="bg-gray-50 border-b text-gray-600">
+                <th className="p-3">Customer</th>
+                <th className="p-3">Email</th>
+                <th className="p-3">Pending Total</th>
+                <th className="p-3">Reminder</th>
+              </tr>
+            </thead>
+            <tbody>
+              {clientSummary.map((entry, idx) => {
+                const { subject, body } = summaryEmailPayload(entry);
+                const link = buildGmailLink({ to: entry.email || "", subject, body });
+                return (
+                  <tr key={idx} className="border-b hover:bg-gray-50">
+                    <td className="p-3">{entry.customerName}</td>
+                    <td className="p-3">{entry.email || "—"}</td>
+                    <td className="p-3">{fmtInr(entry.totalPending)}</td>
+                    <td className="p-3">
+                      <a href={link} target="_blank" rel="noreferrer" className="px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700">
+                        Send Summary
+                      </a>
+                    </td>
+                  </tr>
+                );
+              })}
+              {clientSummary.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="p-6 text-center text-gray-500">No pending balances 🎉</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div>
@@ -996,8 +1047,7 @@ const ReportsView = ({ invoices, customers, xlsxReady }) => {
     </div>
   );
 };
-
-/* ------------------------------ Forms (InvoiceForm + CustomerForm) ------------------------------ */
+/* ------------------------------ Forms ------------------------------ */
 const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice }) => {
   const [touchedNumber, setTouchedNumber] = useState(false);
   const [invoice, setInvoice] = useState(() => {
@@ -1136,263 +1186,451 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
     onSave({ ...invoice, totalAmount });
   };
 
-  const poGrossValue = round2(
-    safeNum(invoice.poBaseValue || 0) * (1 + safeNum(invoice.poGstRate || 0) / 100)
-  );
+  const poGrossValue = round2(safeNum(invoice.poBaseValue || 0) * (1 + safeNum(invoice.poGstRate || 0) / 100));
   const gstSplitHint = (rate, mode) => {
-    if (mode === "igst") return `IGST ${rate}%`;
-    return `CGST ${rate / 2}% + SGST ${rate / 2}%`;
+    rate = safeNum(rate);
+    return mode === "igst" ? `IGST ${rate}%` : `CGST ${(rate / 2).toFixed(2)}% + SGST ${(rate / 2).toFixed(2)}%`;
   };
 
   return (
-    <form onSubmit={submit} className="space-y-6">
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <TextInput
-          label="Invoice #"
-          value={invoice.invoiceNumber}
-          onChange={(e) => {
-            setTouchedNumber(true);
-            setInvoice((prev) => ({ ...prev, invoiceNumber: e.target.value }));
-          }}
-        />
-        <TextInput
+    <form onSubmit={submit} className="bg-white p-6 rounded-xl shadow space-y-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div>
+          <label className="mb-1 block text-sm text-gray-600">Invoice #</label>
+          <input
+            value={invoice.invoiceNumber}
+            onChange={(e) => {
+              setTouchedNumber(true);
+              setInvoice({ ...invoice, invoiceNumber: e.target.value });
+            }}
+            className="p-2 border rounded-lg w-full"
+            required
+          />
+          <p className="text-xs text-gray-500 mt-1">
+            Format: <code>PINV/YYYY/MM/DD980001</code>
+          </p>
+        </div>
+        <Input
           label="Invoice Date"
           type="date"
           value={invoice.invoiceDate}
-          onChange={(e) => setInvoice((prev) => ({ ...prev, invoiceDate: e.target.value }))}
+          onChange={(e) => setInvoice({ ...invoice, invoiceDate: e.target.value, dueDate: addDaysISO(e.target.value, 45) })}
+          required
         />
-        <TextInput
-          label="Due Date"
-          type="date"
-          value={invoice.dueDate}
-          onChange={(e) => setInvoice((prev) => ({ ...prev, dueDate: e.target.value }))}
-        />
-
-        <SelectInput label="Customer" value={invoice.customerId} onChange={onSelectCustomer}>
-          <option value="">— Select —</option>
-          {customers.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-        </SelectInput>
-
-        <TextInput
-          label="Customer GSTIN"
-          value={invoice.customerGstin}
-          onChange={(e) => setInvoice((prev) => ({ ...prev, customerGstin: e.target.value }))}
-        />
-        <TextInput
-          label="Customer Email"
-          value={invoice.customerEmail}
-          onChange={(e) => setInvoice((prev) => ({ ...prev, customerEmail: e.target.value }))}
-        />
+        <Input label="Due Date" type="date" value={invoice.dueDate} onChange={(e) => setInvoice({ ...invoice, dueDate: e.target.value })} />
       </div>
 
-      {/* PO section */}
-      <div className="border rounded-lg p-4 space-y-4">
-        <h3 className="font-semibold">Purchase Order</h3>
-        <TextInput
-          label="PO Number"
-          value={invoice.poNumber}
-          onChange={(e) => setInvoice((prev) => ({ ...prev, poNumber: e.target.value }))}
-        />
-        <TextInput
-          label="PO Base Value"
-          type="number"
-          value={invoice.poBaseValue}
-          onChange={(e) => setInvoice((prev) => ({ ...prev, poBaseValue: e.target.value }))}
-        />
-        <SelectInput
-          label="GST Mode"
-          value={invoice.poGstMode}
-          onChange={(e) => setInvoice((prev) => ({ ...prev, poGstMode: e.target.value }))}
-        >
-          <option value="cgst_sgst">CGST + SGST</option>
-          <option value="igst">IGST</option>
-        </SelectInput>
-        <TextInput
-          label="GST Rate (%)"
-          type="number"
-          value={invoice.poGstRate}
-          onChange={(e) => setInvoice((prev) => ({ ...prev, poGstRate: e.target.value }))}
-        />
-        <div className="text-sm text-gray-600">
-          Gross Value: {fmtInr(poGrossValue)} ({gstSplitHint(invoice.poGstRate, invoice.poGstMode)})
+      <div className="border-t pt-4">
+        <h3 className="text-lg font-semibold mb-3">Customer</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label className="mb-1 block text-sm text-gray-600">Select Customer</label>
+            <select value={invoice.customerId} onChange={onSelectCustomer} className="p-2 border rounded-lg w-full bg-white">
+              <option value="">— Select Existing —</option>
+              {customers.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <Input label="Customer Name" value={invoice.customerName} onChange={(e) => setInvoice({ ...invoice, customerName: e.target.value })} required />
+          <Input label="Customer Address" value={invoice.customerAddress} onChange={(e) => setInvoice({ ...invoice, customerAddress: e.target.value })} />
+          <Input label="Customer GSTIN" value={invoice.customerGstin} onChange={(e) => setInvoice({ ...invoice, customerGstin: e.target.value.toUpperCase() })} />
+          <Input label="Customer Email" value={invoice.customerEmail} onChange={(e) => setInvoice({ ...invoice, customerEmail: e.target.value })} />
+        </div>
+      </div>
+
+      {/* PO & Status */}
+      <div className="border-t pt-4">
+        <h3 className="text-lg font-semibold mb-3">PO & Status</h3>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <Input label="PO Number" value={invoice.poNumber} onChange={(e) => setInvoice({ ...invoice, poNumber: e.target.value })} />
+          <div>
+            <label className="mb-1 block text-sm text-gray-600">PO Image (PNG/JPG)</label>
+            <input
+              type="file"
+              accept="image/*"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (!f) return;
+                const reader = new FileReader();
+                reader.onload = (ev) => setInvoice((prev) => ({ ...prev, poImage: String(ev.target.result) })); // dataURL
+                reader.readAsDataURL(f);
+              }}
+              className="p-2 border rounded-lg w-full bg-white"
+            />
+            {invoice.poImage && (
+              <a href={invoice.poImage} target="_blank" rel="noreferrer" className="text-indigo-600 text-sm mt-1 inline-block">
+                Preview PO Image
+              </a>
+            )}
+          </div>
+          <div>
+            <label className="mb-1 block text-sm text-gray-600">Invoice Status</label>
+            <select
+              value={invoice.status}
+              onChange={(e) => setInvoice({ ...invoice, status: e.target.value })}
+              className="p-2 border rounded-lg w-full bg-white"
+            >
+              <option value="pending">Pending</option>
+              <option value="paid-half">Paid-Half</option>
+              <option value="paid">Paid</option>
+            </select>
+          </div>
+        </div>
+
+        {/* PO Value + GST */}
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4">
+          <Input
+            label="PO Base Value (Taxable)"
+            type="number"
+            value={invoice.poBaseValue}
+            onChange={(e) => setInvoice({ ...invoice, poBaseValue: safeNum(e.target.value) })}
+          />
+          <div>
+            <label className="mb-1 block text-sm text-gray-600">PO GST Mode</label>
+            <select
+              value={invoice.poGstMode}
+              onChange={(e) => setInvoice({ ...invoice, poGstMode: e.target.value })}
+              className="p-2 border rounded-lg w-full bg-white"
+            >
+              <option value="cgst_sgst">CGST+SGST</option>
+              <option value="igst">IGST</option>
+            </select>
+            <div className="text-xs text-gray-500 mt-1">{gstSplitHint(invoice.poGstRate, invoice.poGstMode)}</div>
+          </div>
+          <div>
+            <label className="mb-1 block text-sm text-gray-600">PO GST %</label>
+            <select
+              value={invoice.poGstRate}
+              onChange={(e) => setInvoice({ ...invoice, poGstRate: safeNum(e.target.value) })}
+              className="p-2 border rounded-lg w-full bg-white"
+            >
+              {GST_RATES.map((r) => (
+                <option key={`po-${r}`} value={r}>{r}%</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="mb-1 block text-sm text-gray-600">PO Gross (Auto)</label>
+            <input value={poGrossValue} readOnly className="p-2 border rounded-lg w-full bg-gray-50" />
+          </div>
         </div>
       </div>
 
       {/* Items */}
-      <div>
-        <h3 className="font-semibold mb-2">Invoice Items</h3>
+      <div className="border-t pt-4">
+        <h3 className="text-lg font-semibold mb-3">Invoice Items</h3>
         <div className="overflow-x-auto">
-          <table className="w-full text-sm border">
-            <thead>
-              <tr className="bg-gray-50 border-b">
+          <table className="w-full text-sm text-left border">
+            <thead className="bg-gray-50">
+              <tr>
                 <th className="p-2">Description</th>
-                <th className="p-2">HSN</th>
+                <th className="p-2">HSN/SAC</th>
                 <th className="p-2">Qty</th>
                 <th className="p-2">Rate</th>
                 <th className="p-2">GST Mode</th>
-                <th className="p-2">GST Rate</th>
+                <th className="p-2">GST %</th>
+                <th className="p-2">Tax Split</th>
                 <th className="p-2">Total</th>
-                <th className="p-2"></th>
+                <th className="p-2">Action</th>
               </tr>
             </thead>
             <tbody>
-              {invoice.items.map((it, idx) => (
-                <tr key={idx} className="border-b">
-                  <td className="p-2">
-                    <input
-                      className="border px-2 py-1 rounded w-full"
-                      value={it.description}
-                      onChange={(e) => updateItem(idx, "description", e.target.value)}
-                    />
-                  </td>
-                  <td className="p-2">
-                    <input
-                      className="border px-2 py-1 rounded w-full"
-                      value={it.hsn}
-                      onChange={(e) => updateItem(idx, "hsn", e.target.value)}
-                    />
-                  </td>
-                  <td className="p-2">
-                    <input
-                      type="number"
-                      className="border px-2 py-1 rounded w-20"
-                      value={it.quantity}
-                      onChange={(e) => updateItem(idx, "quantity", e.target.value)}
-                    />
-                  </td>
-                  <td className="p-2">
-                    <input
-                      type="number"
-                      className="border px-2 py-1 rounded w-24"
-                      value={it.rate}
-                      onChange={(e) => updateItem(idx, "rate", e.target.value)}
-                    />
-                  </td>
-                  <td className="p-2">
-                    <select
-                      className="border px-2 py-1 rounded"
-                      value={it.gstMode}
-                      onChange={(e) => updateItem(idx, "gstMode", e.target.value)}
-                    >
-                      <option value="cgst_sgst">CGST + SGST</option>
-                      <option value="igst">IGST</option>
-                    </select>
-                  </td>
-                  <td className="p-2">
-                    <input
-                      type="number"
-                      className="border px-2 py-1 rounded w-20"
-                      value={it.gstRate}
-                      onChange={(e) => updateItem(idx, "gstRate", e.target.value)}
-                    />
-                  </td>
-                  <td className="p-2">{fmtInr(it.total)}</td>
-                  <td className="p-2">
-                    <button
-                      type="button"
-                      onClick={() => removeItem(idx)}
-                      className="px-2 py-1 rounded bg-red-100 text-red-700 hover:bg-red-200"
-                    >
-                      ✕
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              <tr>
-                <td colSpan={8} className="p-2">
-                  <button
-                    type="button"
-                    onClick={addItem}
-                    className="px-3 py-1 rounded bg-green-600 text-white hover:bg-green-700"
-                  >
-                    + Add Item
-                  </button>
-                </td>
-              </tr>
+              {invoice.items.map((it, idx) => {
+                const { total } = calcItem(it);
+                const splitText =
+                  it.gstMode === "igst"
+                    ? `IGST ${safeNum(it.gstRate)}%`
+                    : `CGST ${(safeNum(it.gstRate) / 2).toFixed(2)}% + SGST ${(safeNum(it.gstRate) / 2).toFixed(2)}%`;
+
+                return (
+                  <tr key={idx} className="border-t">
+                    <td className="p-2">
+                      <input value={it.description} onChange={(e) => updateItem(idx, "description", e.target.value)} className="p-1 border rounded w-40" />
+                    </td>
+                    <td className="p-2">
+                      <input value={it.hsn} onChange={(e) => updateItem(idx, "hsn", e.target.value)} className="p-1 border rounded w-24" />
+                    </td>
+                    <td className="p-2">
+                      <input type="number" value={it.quantity} onChange={(e) => updateItem(idx, "quantity", e.target.value)} className="p-1 border rounded w-16" min="0" step="0.01" />
+                    </td>
+                    <td className="p-2">
+                      <input type="number" value={it.rate} onChange={(e) => updateItem(idx, "rate", e.target.value)} className="p-1 border rounded w-20" min="0" step="0.01" />
+                    </td>
+                    <td className="p-2">
+                      <select value={it.gstMode} onChange={(e) => updateItem(idx, "gstMode", e.target.value)} className="p-1 border rounded">
+                        <option value="cgst_sgst">CGST+SGST</option>
+                        <option value="igst">IGST</option>
+                      </select>
+                    </td>
+                    <td className="p-2">
+                      <select value={it.gstRate} onChange={(e) => updateItem(idx, "gstRate", e.target.value)} className="p-1 border rounded">
+                        {GST_RATES.map((r) => (
+                          <option key={`item-gst-${idx}-${r}`} value={r}>{r}%</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="p-2 text-xs text-gray-600">{splitText}</td>
+                    <td className="p-2">{fmtInr(total)}</td>
+                    <td className="p-2">
+                      <button type="button" onClick={() => removeItem(idx)} className="text-red-600 hover:underline" aria-label="Remove item" title="Remove item">✕</button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
+        <button type="button" onClick={addItem} className="mt-2 px-3 py-1 bg-gray-200 rounded hover:bg-gray-300">
+          + Add Item
+        </button>
       </div>
 
       {/* Totals */}
-      <div className="space-y-1 text-right">
-        <div>Subtotal: {fmtInr(subTotal)}</div>
-        <div>Tax: {fmtInr(totalTax)}</div>
-        <div className="font-semibold">Total: {fmtInr(totalAmount)}</div>
+      <div className="border-t pt-4 space-y-2">
+        <div className="flex justify-between text-sm">
+          <span>Sub Total:</span>
+          <span>{fmtInr(subTotal)}</span>
+        </div>
+        <div className="flex justify-between text-sm">
+          <span>Total Tax:</span>
+          <span>{fmtInr(totalTax)}</span>
+        </div>
+        <div className="flex justify-between font-bold">
+          <span>Grand Total:</span>
+          <span>{fmtInr(totalAmount)}</span>
+        </div>
       </div>
 
-      <div className="flex gap-2">
-        <button type="submit" className="px-4 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-700">
-          Save Invoice
-        </button>
-        <button type="button" onClick={onCancel} className="px-4 py-2 rounded bg-gray-200 hover:bg-gray-300">
+      {/* Actions */}
+      <div className="flex justify-end gap-3 pt-4">
+        <button type="button" onClick={onCancel} className="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">
           Cancel
+        </button>
+        <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700">
+          Save Invoice
         </button>
       </div>
     </form>
   );
 };
 
-/* ------------------------------ Customer Form ------------------------------ */
 const CustomerForm = ({ onSave, onCancel, existingCustomer }) => {
-  const [customer, setCustomer] = useState(() => ({
-    id: existingCustomer?.id || null,
-    name: existingCustomer?.name || "",
-    email: existingCustomer?.email || "",
-    phone: existingCustomer?.phone || "",
-    address: existingCustomer?.address || "",
-    gstin: existingCustomer?.gstin || "",
-  }));
+  const [c, setC] = useState(() => existingCustomer || { id: null, name: "", email: "", phone: "", address: "", gstin: "" });
 
   const submit = (e) => {
     e.preventDefault();
-    if (!customer.name) return alert("Customer name is required");
-    if (customer.gstin && !GSTIN_REGEX.test(customer.gstin)) {
+    if (!c.name) return alert("Name is required");
+    if (c.gstin && !GSTIN_REGEX.test(c.gstin)) {
       if (!window.confirm("GSTIN does not look valid. Save anyway?")) return;
     }
-    onSave(customer);
+    onSave(c);
   };
 
   return (
-    <form onSubmit={submit} className="space-y-4">
-      <TextInput
-        label="Name"
-        value={customer.name}
-        onChange={(e) => setCustomer((prev) => ({ ...prev, name: e.target.value }))}
-      />
-      <TextInput
-        label="Email"
-        type="email"
-        value={customer.email}
-        onChange={(e) => setCustomer((prev) => ({ ...prev, email: e.target.value }))}
-      />
-      <TextInput
-        label="Phone"
-        value={customer.phone}
-        onChange={(e) => setCustomer((prev) => ({ ...prev, phone: e.target.value }))}
-      />
-      <TextInput
-        label="Address"
-        value={customer.address}
-        onChange={(e) => setCustomer((prev) => ({ ...prev, address: e.target.value }))}
-      />
-      <TextInput
-        label="GSTIN"
-        value={customer.gstin}
-        onChange={(e) => setCustomer((prev) => ({ ...prev, gstin: e.target.value }))}
-      />
-      <div className="flex gap-2">
-        <button type="submit" className="px-4 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-700">
-          Save Customer
-        </button>
-        <button type="button" onClick={onCancel} className="px-4 py-2 rounded bg-gray-200 hover:bg-gray-300">
+    <form onSubmit={submit} className="bg-white p-6 rounded-xl shadow space-y-4">
+      <Input label="Customer Name" value={c.name} onChange={(e) => setC({ ...c, name: e.target.value })} required />
+      <Input label="Email" value={c.email} onChange={(e) => setC({ ...c, email: e.target.value })} />
+      <Input label="Phone" value={c.phone} onChange={(e) => setC({ ...c, phone: e.target.value })} />
+      <Input label="Address" value={c.address} onChange={(e) => setC({ ...c, address: e.target.value })} />
+      <Input label="GSTIN" value={c.gstin} onChange={(e) => setC({ ...c, gstin: e.target.value.toUpperCase() })} />
+      <div className="flex justify-end gap-3">
+        <button type="button" onClick={onCancel} className="px-4 py-2 bg-gray-200 rounded">
           Cancel
+        </button>
+        <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded">
+          Save
         </button>
       </div>
     </form>
   );
 };
+
+/* ------------------------------ Shared Helpers ------------------------------ */
+const Input = ({ label, ...props }) => (
+  <div>
+    <label className="mb-1 block text-sm text-gray-600">{label}</label>
+    <input {...props} className={`p-2 border rounded-lg w-full ${props.className || ""}`} />
+  </div>
+);
+
+const loadLS = (key, fallback) => {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+};
+const saveLS = (key, val) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(val));
+  } catch {}
+};
+
+const cmp = (a, b, key, dir) => {
+  const va = a?.[key] ?? "";
+  const vb = b?.[key] ?? "";
+  if (va < vb) return dir === "asc" ? -1 : 1;
+ 
+  if (va > vb) return dir === "asc" ? 1 : -1;
+  return 0;
+};
+
+/* ------------------------------ Printable Invoice (A4 boxed, portrait) ------------------------------ */
+function generatePrintableInvoice(inv) {
+  const itemsHtml = (inv.items || [])
+    .map((it, idx) => {
+      const { taxable, cgstAmt, sgstAmt, igstAmt, total } = calcItem(it);
+      const splitText =
+        safeNum(it.igst) > 0
+          ? `IGST ${safeNum(it.igst).toFixed(2)}%`
+          : `CGST ${safeNum(it.cgst).toFixed(2)}% + SGST ${safeNum(it.sgst).toFixed(2)}%`;
+
+      return `<tr>
+        <td style="text-align:center">${idx + 1}</td>
+        <td>
+          ${escapeHtml(it.description || "")}
+          <div style="color:#666;font-size:10px;margin-top:2px">${escapeHtml(splitText)}</div>
+        </td>
+        <td style="text-align:center">${escapeHtml(it.hsn || "")}</td>
+        <td style="text-align:right">${safeNum(it.quantity).toFixed(2)}</td>
+        <td style="text-align:right">${safeNum(it.rate).toFixed(2)}</td>
+        <td style="text-align:right">${taxable.toFixed(2)}</td>
+        <td style="text-align:right">${cgstAmt.toFixed(2)}</td>
+        <td style="text-align:right">${sgstAmt.toFixed(2)}</td>
+        <td style="text-align:right">${igstAmt.toFixed(2)}</td>
+        <td style="text-align:right; font-weight:600">${total.toFixed(2)}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const subTotal   = round2(sum(inv.items.map(calcItem), "taxable"));
+  const totalCgst  = round2(sum(inv.items.map(calcItem), "cgstAmt"));
+  const totalSgst  = round2(sum(inv.items.map(calcItem), "sgstAmt"));
+  const totalIgst  = round2(sum(inv.items.map(calcItem), "igstAmt"));
+  const grandTotal = round2(safeNum(inv.totalAmount));
+
+  const dueInfo = inv.dueDate ? `Due Date: ${inv.dueDate}` : "";
+  const poBlock = `
+    <div style="margin-top:6px">
+      <strong>PO No:</strong> ${escapeHtml(inv.poNumber || "—")}
+      ${inv.poImage ? `&nbsp;&nbsp;|&nbsp;&nbsp;<a href="${inv.poImage}" target="_blank">View PO Image</a>` : ""}
+    </div>`;
+
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeHtml(inv.invoiceNumber || "Invoice")}</title>
+  <style>
+    @page { size: A4; margin: 14mm; }
+    body { font-family: Arial, sans-serif; color:#222; }
+    .sheet { border: 2px solid #111; border-radius: 6px; padding: 14px 16px; }
+    .row { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
+    .muted { color:#666; }
+    h1 { font-size:18px; margin:0; }
+    h2 { font-size:14px; margin:0 0 8px 0; }
+    .hr { height:1px; background:#ddd; margin:10px 0; }
+    table { width:100%; border-collapse: collapse; }
+    th, td { border:1px solid #333; padding:6px 8px; font-size:12px; }
+    th { background:#f5f5f5; text-align:center; }
+    .totals td { border:none; padding:3px 0; font-size:12px; }
+    .totals .label { text-align:right; padding-right:8px; }
+    .totals .value { text-align:right; width:120px; font-weight:600; }
+    .footer { margin-top:18px; text-align:center; font-size:11px; color:#666; }
+  </style>
+</head>
+<body>
+  <div class="sheet">
+    <div class="row">
+      <div>
+        <h1>${escapeHtml(companyDetails.name)}</h1>
+        <div>${escapeHtml(companyDetails.address)}</div>
+        <div>Phone: ${escapeHtml(companyDetails.phone)} &nbsp;|&nbsp; Email: ${escapeHtml(companyDetails.email)}</div>
+        <div class="muted">Owners: ${escapeHtml(companyDetails.owners)}</div>
+      </div>
+      <div style="text-align:right">
+        <h2>Tax Invoice</h2>
+        <div><strong>Invoice #:</strong> ${escapeHtml(inv.invoiceNumber || "")}</div>
+        <div><strong>Date:</strong> ${escapeHtml(inv.invoiceDate || "")}</div>
+        <div><strong>Status:</strong> ${escapeHtml((inv.status || "pending").toUpperCase())}</div>
+        <div>${escapeHtml(dueInfo)}</div>
+        ${poBlock}
+      </div>
+    </div>
+
+    <div class="hr"></div>
+
+    <div class="row" style="margin-bottom:8px">
+      <div>
+        <h2>Bill To</h2>
+        <div><strong>${escapeHtml(inv.customerName || "")}</strong></div>
+        <div>${escapeHtml(inv.customerAddress || "—")}</div>
+        <div>GSTIN: ${escapeHtml(inv.customerGstin || "—")}</div>
+        <div>Email: ${escapeHtml(inv.customerEmail || "—")}</div>
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th style="width:42px">#</th>
+          <th>Description</th>
+          <th style="width:90px">HSN/SAC</th>
+          <th style="width:70px">Qty</th>
+          <th style="width:90px">Rate</th>
+          <th style="width:100px">Taxable</th>
+          <th style="width:85px">CGST</th>
+          <th style="width:85px">SGST</th>
+          <th style="width:85px">IGST</th>
+          <th style="width:110px">Line Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${itemsHtml || `<tr><td colspan="10" style="text-align:center">No items</td></tr>`}
+      </tbody>
+    </table>
+
+    <table style="margin-top:10px; border:none">
+      <tbody class="totals">
+        <tr><td class="label">Sub Total:</td><td class="value">${subTotal.toFixed(2)}</td></tr>
+        <tr><td class="label">CGST Total:</td><td class="value">${totalCgst.toFixed(2)}</td></tr>
+        <tr><td class="label">SGST Total:</td><td class="value">${totalSgst.toFixed(2)}</td></tr>
+        <tr><td class="label">IGST Total:</td><td class="value">${totalIgst.toFixed(2)}</td></tr>
+        <tr><td class="label" style="font-size:13px"><strong>Grand Total:</strong></td>
+            <td class="value" style="font-size:13px"><strong>${grandTotal.toFixed(2)}</strong></td></tr>
+      </tbody>
+    </table>
+
+    <!-- Stamp & Signature row -->
+    <div class="row" style="margin-top:14px; gap:20px">
+      <div style="flex:1">
+        <div style="border:1px dashed #888; height:90px; border-radius:4px; display:flex; align-items:center; justify-content:center; color:#666;">
+          Company Stamp
+        </div>
+      </div>
+      <div style="flex:1; text-align:right">
+        <div style="margin-top:56px; border-top:1px solid #333; display:inline-block; padding-top:6px;">
+          Authorized Signature
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">This is a computer-generated invoice. No signature required.</div>
+  </div>
+</body>
+</html>`;
+}
+
+/* escape for printing */
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+console.log("✅ App.js loaded");
