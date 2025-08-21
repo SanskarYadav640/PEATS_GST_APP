@@ -817,14 +817,193 @@ const cmp = (a, b, key, dir) => {
   if (va > vb) return dir === "asc" ? 1 : -1;
   return 0;
 };
+/* ------------------------------ Customers ------------------------------ */
+const CustomerListView = ({ customers, onEdit, onDelete }) => {
+  const [query, setQuery] = useState("");
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return !q
+      ? customers
+      : customers.filter((c) =>
+          [c.name, c.email, c.phone].filter(Boolean).some((v) => String(v).toLowerCase().includes(q))
+        );
+  }, [customers, query]);
 
-/* ------------------------------ Forms ------------------------------ */
+  const handleDelete = (id) => {
+    if (window.confirm("Delete this customer? This cannot be undone.")) onDelete("customer", id);
+  };
+
+  return (
+    <div className="bg-white p-5 rounded-xl shadow">
+      <div className="mb-4">
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search customers..."
+          className="px-3 py-2 border rounded-lg w-72 max-w-full"
+        />
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-sm">
+          <thead>
+            <tr className="bg-gray-50 border-b text-gray-600">
+              <th className="p-3">Name</th>
+              <th className="p-3">Email</th>
+              <th className="p-3">Phone</th>
+              <th className="p-3">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((c) => (
+              <tr key={c.id} className="border-b hover:bg-gray-50">
+                <td className="p-3 font-medium">{c.name}</td>
+                <td className="p-3">{c.email || "—"}</td>
+                <td className="p-3">{c.phone || "—"}</td>
+                <td className="p-3">
+                  <div className="flex items-center gap-1">
+                    <IconBtn title="Edit" onClick={() => onEdit(c)} icon={ICONS.edit} className="text-blue-600 hover:bg-blue-50" />
+                    <IconBtn title="Delete" onClick={() => handleDelete(c.id)} icon={ICONS.delete} className="text-red-600 hover:bg-red-50" />
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {filtered.length === 0 && (
+              <tr>
+                <td colSpan={4} className="p-6 text-center text-gray-500">
+                  No customers found.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+/* ------------------------------ Reports (base; client summary comes in final step) ------------------------------ */
+const ReportsView = ({ invoices, customers, xlsxReady }) => {
+  const totals = useMemo(() => {
+    const received = invoices.filter((i) => i.status === "paid").reduce((s, i) => s + safeNum(i.totalAmount), 0);
+    const remaining = invoices.filter((i) => i.status !== "paid").reduce((s, i) => s + safeNum(i.totalAmount), 0);
+    return { received: round2(received), remaining: round2(remaining) };
+  }, [invoices]);
+
+  const pendingRows = useMemo(() => {
+    return invoices
+      .filter((i) => i.status !== "paid")
+      .map((i) => {
+        const d = daysUntilDue(i.dueDate);
+        let email = i.customerEmail || "";
+        if (!email && i.customerId) {
+          const c = customers.find((x) => x.id === i.customerId);
+          email = c?.email || "";
+        }
+        return {
+          id: i.id,
+          invoiceNumber: i.invoiceNumber,
+          customerName: i.customerName,
+          customerEmail: email,
+          dueDate: i.dueDate || "—",
+          amount: round2(safeNum(i.totalAmount)),
+          days: d,
+        };
+      })
+      .sort((a, b) => {
+        const da = a.days ?? 9999, db = b.days ?? 9999;
+        return da - db; // most overdue first
+      });
+  }, [invoices, customers]);
+
+  return (
+    <div className="bg-white p-5 rounded-xl shadow space-y-6">
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold">GST & Sales Reports</h2>
+        <ExportExcelButton invoices={invoices} disabled={!xlsxReady} />
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <StatCard title="Amount Received" value={fmtInr(totals.received)} />
+        <StatCard title="Amount Remaining" value={fmtInr(totals.remaining)} />
+      </div>
+
+      <div>
+        <h3 className="font-semibold mb-2">Pending Invoices (Aging & Reminders)</h3>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="bg-gray-50 border-b text-gray-600">
+                <th className="p-3">Invoice #</th>
+                <th className="p-3">Customer</th>
+                <th className="p-3">Email</th>
+                <th className="p-3">Due Date</th>
+                <th className="p-3">Days</th>
+                <th className="p-3">Amount</th>
+                <th className="p-3">Reminder</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pendingRows.map((r) => {
+                const { subject, body } = formatReminderEmail({
+                  invoiceNumber: r.invoiceNumber,
+                  dueDate: r.dueDate === "—" ? "" : r.dueDate,
+                  customerName: r.customerName,
+                  totalAmount: r.amount,
+                });
+                const link = buildGmailLink({ to: r.customerEmail || "", subject, body });
+                const badge =
+                  typeof r.days === "number" ? (
+                    r.days < 0 ? (
+                      <span className="px-2 py-1 rounded-full text-xs bg-red-100 text-red-800">
+                        {Math.abs(r.days)} day(s) overdue
+                      </span>
+                    ) : (
+                      <span className="px-2 py-1 rounded-full text-xs bg-amber-100 text-amber-800">
+                        {r.days} day(s) remaining
+                      </span>
+                    )
+                  ) : (
+                    <span className="px-2 py-1 rounded-full text-xs bg-gray-100 text-gray-700">—</span>
+                  );
+
+                return (
+                  <tr key={r.id} className="border-b hover:bg-gray-50">
+                    <td className="p-3 font-medium">{r.invoiceNumber}</td>
+                    <td className="p-3">{r.customerName}</td>
+                    <td className="p-3">{r.customerEmail || "—"}</td>
+                    <td className="p-3">{r.dueDate}</td>
+                    <td className="p-3">{badge}</td>
+                    <td className="p-3">{fmtInr(r.amount)}</td>
+                    <td className="p-3">
+                      <a href={link} target="_blank" rel="noreferrer" className="px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700">
+                        Send Reminder
+                      </a>
+                    </td>
+                  </tr>
+                );
+              })}
+              {pendingRows.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="p-6 text-center text-gray-500">
+                    No pending invoices 🎉
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/* ------------------------------ Forms (InvoiceForm + CustomerForm) ------------------------------ */
 const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice }) => {
   const [touchedNumber, setTouchedNumber] = useState(false);
   const [invoice, setInvoice] = useState(() => {
     const initDate = existingInvoice?.invoiceDate || todayISO();
     const defaultNumber = existingInvoice?.invoiceNumber || nextInvoiceNumberForDate(initDate, allInvoices);
-    const initialDue = existingInvoice?.dueDate || addDaysISO(initDate, 45); // +45 days
+    const initialDue = existingInvoice?.dueDate || addDaysISO(initDate, 45); // +45 days auto
     return {
       id: existingInvoice?.id || null,
       invoiceNumber: defaultNumber,
@@ -861,7 +1040,7 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
     };
   });
 
-  // Auto-regenerate invoice number on date change (only for new & untouched)
+  // Auto regenerate # and due date when invoice date changes (only for new & untouched #)
   useEffect(() => {
     if (existingInvoice?.id) return;
     if (touchedNumber) return;
@@ -960,284 +1139,258 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
   const poGrossValue = round2(
     safeNum(invoice.poBaseValue || 0) * (1 + safeNum(invoice.poGstRate || 0) / 100)
   );
-
   const gstSplitHint = (rate, mode) => {
-    rate = safeNum(rate);
-    return mode === "igst" ? `IGST ${rate}%` : `CGST ${(rate/2).toFixed(2)}% + SGST ${(rate/2).toFixed(2)}%`;
+    if (mode === "igst") return `IGST ${rate}%`;
+    return `CGST ${rate / 2}% + SGST ${rate / 2}%`;
   };
 
   return (
-    <form onSubmit={submit} className="bg-white p-6 rounded-xl shadow space-y-6">
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div>
-          <label className="mb-1 block text-sm text-gray-600">Invoice #</label>
-          <input
-            value={invoice.invoiceNumber}
-            onChange={(e) => {
-              setTouchedNumber(true);
-              setInvoice({ ...invoice, invoiceNumber: e.target.value });
-            }}
-            className="p-2 border rounded-lg w-full"
-            required
-          />
-          <p className="text-xs text-gray-500 mt-1">
-            Format: <code>PINV/YYYY/MM/DD980001</code>
-          </p>
-        </div>
-        <Input
+    <form onSubmit={submit} className="space-y-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <TextInput
+          label="Invoice #"
+          value={invoice.invoiceNumber}
+          onChange={(e) => {
+            setTouchedNumber(true);
+            setInvoice((prev) => ({ ...prev, invoiceNumber: e.target.value }));
+          }}
+        />
+        <TextInput
           label="Invoice Date"
           type="date"
           value={invoice.invoiceDate}
-          onChange={(e) => setInvoice({ ...invoice, invoiceDate: e.target.value, dueDate: addDaysISO(e.target.value, 45) })}
-          required
+          onChange={(e) => setInvoice((prev) => ({ ...prev, invoiceDate: e.target.value }))}
         />
-        <Input label="Due Date" type="date" value={invoice.dueDate} onChange={(e) => setInvoice({ ...invoice, dueDate: e.target.value })} />
+        <TextInput
+          label="Due Date"
+          type="date"
+          value={invoice.dueDate}
+          onChange={(e) => setInvoice((prev) => ({ ...prev, dueDate: e.target.value }))}
+        />
+
+        <SelectInput label="Customer" value={invoice.customerId} onChange={onSelectCustomer}>
+          <option value="">— Select —</option>
+          {customers.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
+            </option>
+          ))}
+        </SelectInput>
+
+        <TextInput
+          label="Customer GSTIN"
+          value={invoice.customerGstin}
+          onChange={(e) => setInvoice((prev) => ({ ...prev, customerGstin: e.target.value }))}
+        />
+        <TextInput
+          label="Customer Email"
+          value={invoice.customerEmail}
+          onChange={(e) => setInvoice((prev) => ({ ...prev, customerEmail: e.target.value }))}
+        />
       </div>
 
-      <div className="border-t pt-4">
-        <h3 className="text-lg font-semibold mb-3">Customer</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label className="mb-1 block text-sm text-gray-600">Select Customer</label>
-            <select value={invoice.customerId} onChange={onSelectCustomer} className="p-2 border rounded-lg w-full bg-white">
-              <option value="">— Select Existing —</option>
-              {customers.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <Input label="Customer Name" value={invoice.customerName} onChange={(e) => setInvoice({ ...invoice, customerName: e.target.value })} required />
-          <Input label="Customer Address" value={invoice.customerAddress} onChange={(e) => setInvoice({ ...invoice, customerAddress: e.target.value })} />
-          <Input label="Customer GSTIN" value={invoice.customerGstin} onChange={(e) => setInvoice({ ...invoice, customerGstin: e.target.value.toUpperCase() })} />
-          <Input label="Customer Email" value={invoice.customerEmail} onChange={(e) => setInvoice({ ...invoice, customerEmail: e.target.value })} />
-        </div>
-      </div>
-
-      {/* PO & Status */}
-      <div className="border-t pt-4">
-        <h3 className="text-lg font-semibold mb-3">PO & Status</h3>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <Input label="PO Number" value={invoice.poNumber} onChange={(e) => setInvoice({ ...invoice, poNumber: e.target.value })} />
-          <div>
-            <label className="mb-1 block text-sm text-gray-600">PO Image (PNG/JPG)</label>
-            <input
-              type="file"
-              accept="image/*"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (!f) return;
-                const reader = new FileReader();
-                reader.onload = (ev) => setInvoice((prev) => ({ ...prev, poImage: String(ev.target.result) }));
-                reader.readAsDataURL(f);
-              }}
-              className="p-2 border rounded-lg w-full bg-white"
-            />
-            {invoice.poImage && (
-              <a href={invoice.poImage} target="_blank" rel="noreferrer" className="text-indigo-600 text-sm mt-1 inline-block">
-                Preview PO Image
-              </a>
-            )}
-          </div>
-          <div>
-            <label className="mb-1 block text-sm text-gray-600">Invoice Status</label>
-            <select
-              value={invoice.status}
-              onChange={(e) => setInvoice({ ...invoice, status: e.target.value })}
-              className="p-2 border rounded-lg w-full bg-white"
-            >
-              <option value="pending">Pending</option>
-              <option value="paid-half">Paid-Half</option>
-              <option value="paid">Paid</option>
-            </select>
-          </div>
-        </div>
-
-        {/* PO Value + GST */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4">
-          <Input
-            label="PO Base Value (Taxable)"
-            type="number"
-            value={invoice.poBaseValue}
-            onChange={(e) => setInvoice({ ...invoice, poBaseValue: safeNum(e.target.value) })}
-          />
-          <div>
-            <label className="mb-1 block text-sm text-gray-600">PO GST Mode</label>
-            <select
-              value={invoice.poGstMode}
-              onChange={(e) => setInvoice({ ...invoice, poGstMode: e.target.value })}
-              className="p-2 border rounded-lg w-full bg-white"
-            >
-              <option value="cgst_sgst">CGST+SGST</option>
-              <option value="igst">IGST</option>
-            </select>
-            <div className="text-xs text-gray-500 mt-1">{gstSplitHint(invoice.poGstRate, invoice.poGstMode)}</div>
-          </div>
-          <div>
-            <label className="mb-1 block text-sm text-gray-600">PO GST %</label>
-            <select
-              value={invoice.poGstRate}
-              onChange={(e) => setInvoice({ ...invoice, poGstRate: safeNum(e.target.value) })}
-              className="p-2 border rounded-lg w-full bg-white"
-            >
-              {GST_RATES.map((r) => (
-                <option key={`po-${r}`} value={r}>{r}%</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="mb-1 block text-sm text-gray-600">PO Gross (Auto)</label>
-            <input value={poGrossValue} readOnly className="p-2 border rounded-lg w-full bg-gray-50" />
-          </div>
+      {/* PO section */}
+      <div className="border rounded-lg p-4 space-y-4">
+        <h3 className="font-semibold">Purchase Order</h3>
+        <TextInput
+          label="PO Number"
+          value={invoice.poNumber}
+          onChange={(e) => setInvoice((prev) => ({ ...prev, poNumber: e.target.value }))}
+        />
+        <TextInput
+          label="PO Base Value"
+          type="number"
+          value={invoice.poBaseValue}
+          onChange={(e) => setInvoice((prev) => ({ ...prev, poBaseValue: e.target.value }))}
+        />
+        <SelectInput
+          label="GST Mode"
+          value={invoice.poGstMode}
+          onChange={(e) => setInvoice((prev) => ({ ...prev, poGstMode: e.target.value }))}
+        >
+          <option value="cgst_sgst">CGST + SGST</option>
+          <option value="igst">IGST</option>
+        </SelectInput>
+        <TextInput
+          label="GST Rate (%)"
+          type="number"
+          value={invoice.poGstRate}
+          onChange={(e) => setInvoice((prev) => ({ ...prev, poGstRate: e.target.value }))}
+        />
+        <div className="text-sm text-gray-600">
+          Gross Value: {fmtInr(poGrossValue)} ({gstSplitHint(invoice.poGstRate, invoice.poGstMode)})
         </div>
       </div>
 
       {/* Items */}
-      <div className="border-t pt-4">
-        <h3 className="text-lg font-semibold mb-3">Invoice Items</h3>
+      <div>
+        <h3 className="font-semibold mb-2">Invoice Items</h3>
         <div className="overflow-x-auto">
-          <table className="w-full text-sm text-left border">
-            <thead className="bg-gray-50">
-              <tr>
+          <table className="w-full text-sm border">
+            <thead>
+              <tr className="bg-gray-50 border-b">
                 <th className="p-2">Description</th>
-                <th className="p-2">HSN/SAC</th>
+                <th className="p-2">HSN</th>
                 <th className="p-2">Qty</th>
                 <th className="p-2">Rate</th>
                 <th className="p-2">GST Mode</th>
-                <th className="p-2">GST %</th>
-                <th className="p-2">GST %</th>
-                <th className="p-2">Tax Split</th>
+                <th className="p-2">GST Rate</th>
                 <th className="p-2">Total</th>
-                <th className="p-2">Action</th>
+                <th className="p-2"></th>
               </tr>
             </thead>
             <tbody>
-              {invoice.items.map((it, idx) => {
-                const { total } = calcItem(it);
-                const splitText =
-                  it.gstMode === "igst"
-                    ? `IGST ${safeNum(it.gstRate)}%`
-                    : `CGST ${(safeNum(it.gstRate) / 2).toFixed(2)}% + SGST ${(safeNum(it.gstRate) / 2).toFixed(2)}%`;
-
-                return (
-                  <tr key={idx} className="border-t">
-                    <td className="p-2">
-                      <input
-                        value={it.description}
-                        onChange={(e) => updateItem(idx, "description", e.target.value)}
-                        className="p-1 border rounded w-40"
-                      />
-                    </td>
-                    <td className="p-2">
-                      <input
-                        value={it.hsn}
-                        onChange={(e) => updateItem(idx, "hsn", e.target.value)}
-                        className="p-1 border rounded w-24"
-                      />
-                    </td>
-                    <td className="p-2">
-                      <input
-                        type="number"
-                        value={it.quantity}
-                        onChange={(e) => updateItem(idx, "quantity", e.target.value)}
-                        className="p-1 border rounded w-16"
-                        min="0"
-                        step="0.01"
-                      />
-                    </td>
-                    <td className="p-2">
-                      <input
-                        type="number"
-                        value={it.rate}
-                        onChange={(e) => updateItem(idx, "rate", e.target.value)}
-                        className="p-1 border rounded w-20"
-                        min="0"
-                        step="0.01"
-                      />
-                    </td>
-                    <td className="p-2">
-                      <select
-                        value={it.gstMode}
-                        onChange={(e) => updateItem(idx, "gstMode", e.target.value)}
-                        className="p-1 border rounded"
-                      >
-                        <option value="cgst_sgst">CGST+SGST</option>
-                        <option value="igst">IGST</option>
-                      </select>
-                    </td>
-                    <td className="p-2">
-                      <select
-                        value={it.gstRate}
-                        onChange={(e) => updateItem(idx, "gstRate", e.target.value)}
-                        className="p-1 border rounded"
-                      >
-                        {[2.5, 5, 8, 9, 18, 28].map((r) => (
-                          <option key={`item-gst-${idx}-${r}`} value={r}>
-                            {r}%
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-                    <td className="p-2 text-xs text-gray-600">
-                      {splitText}
-                    </td>
-                    <td className="p-2">{fmtInr(total)}</td>
-                    <td className="p-2">
-                      <button
-                        type="button"
-                        onClick={() => removeItem(idx)}
-                        className="text-red-600 hover:underline"
-                        aria-label="Remove item"
-                        title="Remove item"
-                      >
-                        ✕
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
+              {invoice.items.map((it, idx) => (
+                <tr key={idx} className="border-b">
+                  <td className="p-2">
+                    <input
+                      className="border px-2 py-1 rounded w-full"
+                      value={it.description}
+                      onChange={(e) => updateItem(idx, "description", e.target.value)}
+                    />
+                  </td>
+                  <td className="p-2">
+                    <input
+                      className="border px-2 py-1 rounded w-full"
+                      value={it.hsn}
+                      onChange={(e) => updateItem(idx, "hsn", e.target.value)}
+                    />
+                  </td>
+                  <td className="p-2">
+                    <input
+                      type="number"
+                      className="border px-2 py-1 rounded w-20"
+                      value={it.quantity}
+                      onChange={(e) => updateItem(idx, "quantity", e.target.value)}
+                    />
+                  </td>
+                  <td className="p-2">
+                    <input
+                      type="number"
+                      className="border px-2 py-1 rounded w-24"
+                      value={it.rate}
+                      onChange={(e) => updateItem(idx, "rate", e.target.value)}
+                    />
+                  </td>
+                  <td className="p-2">
+                    <select
+                      className="border px-2 py-1 rounded"
+                      value={it.gstMode}
+                      onChange={(e) => updateItem(idx, "gstMode", e.target.value)}
+                    >
+                      <option value="cgst_sgst">CGST + SGST</option>
+                      <option value="igst">IGST</option>
+                    </select>
+                  </td>
+                  <td className="p-2">
+                    <input
+                      type="number"
+                      className="border px-2 py-1 rounded w-20"
+                      value={it.gstRate}
+                      onChange={(e) => updateItem(idx, "gstRate", e.target.value)}
+                    />
+                  </td>
+                  <td className="p-2">{fmtInr(it.total)}</td>
+                  <td className="p-2">
+                    <button
+                      type="button"
+                      onClick={() => removeItem(idx)}
+                      className="px-2 py-1 rounded bg-red-100 text-red-700 hover:bg-red-200"
+                    >
+                      ✕
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              <tr>
+                <td colSpan={8} className="p-2">
+                  <button
+                    type="button"
+                    onClick={addItem}
+                    className="px-3 py-1 rounded bg-green-600 text-white hover:bg-green-700"
+                  >
+                    + Add Item
+                  </button>
+                </td>
+              </tr>
             </tbody>
           </table>
         </div>
-        <button
-          type="button"
-          onClick={addItem}
-          className="mt-2 px-3 py-1 bg-gray-200 rounded hover:bg-gray-300"
-        >
-          + Add Item
-        </button>
-      </div>
-      {/* Totals */}
-      <div className="border-t pt-4 space-y-2">
-        <div className="flex justify-between text-sm">
-          <span>Sub Total:</span>
-          <span>{fmtInr(subTotal)}</span>
-        </div>
-        <div className="flex justify-between text-sm">
-          <span>Total Tax:</span>
-          <span>{fmtInr(totalTax)}</span>
-        </div>
-        <div className="flex justify-between font-bold">
-          <span>Grand Total:</span>
-          <span>{fmtInr(totalAmount)}</span>
-        </div>
       </div>
 
-      {/* Actions */}
-      <div className="flex justify-end gap-3 pt-4">
-        <button
-          type="button"
-          onClick={onCancel}
-          className="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300"
-        >
+      {/* Totals */}
+      <div className="space-y-1 text-right">
+        <div>Subtotal: {fmtInr(subTotal)}</div>
+        <div>Tax: {fmtInr(totalTax)}</div>
+        <div className="font-semibold">Total: {fmtInr(totalAmount)}</div>
+      </div>
+
+      <div className="flex gap-2">
+        <button type="submit" className="px-4 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-700">
+          Save Invoice
+        </button>
+        <button type="button" onClick={onCancel} className="px-4 py-2 rounded bg-gray-200 hover:bg-gray-300">
           Cancel
         </button>
-        <button
-          type="submit"
-          className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700"
-        >
-          Save Invoice
+      </div>
+    </form>
+  );
+};
+
+/* ------------------------------ Customer Form ------------------------------ */
+const CustomerForm = ({ onSave, onCancel, existingCustomer }) => {
+  const [customer, setCustomer] = useState(() => ({
+    id: existingCustomer?.id || null,
+    name: existingCustomer?.name || "",
+    email: existingCustomer?.email || "",
+    phone: existingCustomer?.phone || "",
+    address: existingCustomer?.address || "",
+    gstin: existingCustomer?.gstin || "",
+  }));
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (!customer.name) return alert("Customer name is required");
+    if (customer.gstin && !GSTIN_REGEX.test(customer.gstin)) {
+      if (!window.confirm("GSTIN does not look valid. Save anyway?")) return;
+    }
+    onSave(customer);
+  };
+
+  return (
+    <form onSubmit={submit} className="space-y-4">
+      <TextInput
+        label="Name"
+        value={customer.name}
+        onChange={(e) => setCustomer((prev) => ({ ...prev, name: e.target.value }))}
+      />
+      <TextInput
+        label="Email"
+        type="email"
+        value={customer.email}
+        onChange={(e) => setCustomer((prev) => ({ ...prev, email: e.target.value }))}
+      />
+      <TextInput
+        label="Phone"
+        value={customer.phone}
+        onChange={(e) => setCustomer((prev) => ({ ...prev, phone: e.target.value }))}
+      />
+      <TextInput
+        label="Address"
+        value={customer.address}
+        onChange={(e) => setCustomer((prev) => ({ ...prev, address: e.target.value }))}
+      />
+      <TextInput
+        label="GSTIN"
+        value={customer.gstin}
+        onChange={(e) => setCustomer((prev) => ({ ...prev, gstin: e.target.value }))}
+      />
+      <div className="flex gap-2">
+        <button type="submit" className="px-4 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-700">
+          Save Customer
+        </button>
+        <button type="button" onClick={onCancel} className="px-4 py-2 rounded bg-gray-200 hover:bg-gray-300">
+          Cancel
         </button>
       </div>
     </form>
