@@ -3,14 +3,17 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 /* global XLSX */
 
 /**
- * PEATS — GST Invoice System (Persistent + GST Dropdown + Series Format)
- *
- * ✅ Data persistence: autosaves to localStorage (auto-loads every time you open)
- * ✅ GST selector: choose CGST+SGST or IGST, then pick % from a dropdown (0, 0.1, 0.25, 3, 5, 12, 18, 28)
- * ✅ Invoice series: PINV/YYYY/MM/DD980001 (e.g. PINV/2025/08/21980001) — per-day sequence starting at 980001
- * ✅ Excel import/export (SheetJS)
- * ✅ Print-friendly A4 invoices (inline CSS)
- * ✅ Design/UX tidy (Tailwind classes)
+ * PEATS — GST Invoice System
+ * Updates per request:
+ * - PO section with PO number, base value, GST mode/rate, image upload
+ * - Auto due date = invoice date + 45 days
+ * - Status: Pending / Paid / Paid-Half (affects reports)
+ * - GST rates list: 2.5, 5, 8, 9, 18, 28
+ * - CGST+SGST split shown clearly; IGST shown as-is
+ * - Printable: boxed A4 portrait with Stamp & Signature areas
+ * - Dashboard: removed Clear Local Data
+ * - Reports: client-wise remaining + email reminder
+ * - Excel I/O: added PO value + GST columns
  */
 
 /* ------------------------------ Utils & Constants ------------------------------ */
@@ -24,9 +27,19 @@ const safeNum = (v) => (Number.isFinite(v) ? v : Number.isFinite(+v) ? +v : 0);
 const idGen = () => (crypto?.randomUUID ? crypto.randomUUID() : Date.now().toString());
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 const sum = (arr, key) => arr.reduce((acc, it) => acc + safeNum(it[key] ?? 0), 0);
+const todayISO = () => new Date().toISOString().split("T")[0];
+const addDaysISO = (iso, days) => {
+  const d = new Date(iso || todayISO());
+  d.setDate(d.getDate() + (Number.isFinite(days) ? days : 0));
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+};
 
 const GSTIN_REGEX = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/i;
-const GST_RATES = [0, 0.1, 0.25, 3, 5, 12, 18, 28];
+/** Requested fixed GST rates */
+const GST_RATES = [2.5, 5, 8, 9, 18, 28];
 
 const calcItem = (item) => {
   const qty = Math.max(0, safeNum(item.quantity));
@@ -39,20 +52,96 @@ const calcItem = (item) => {
   return { taxable, cgstAmt, sgstAmt, igstAmt, total };
 };
 
-// Invoice number generator — PINV/YYYY/MM/DD980001 (per day; sequence starts at 980001)
+function daysUntilDue(dueISO) {
+  if (!dueISO) return null;
+  const due = new Date(dueISO);
+  if (Number.isNaN(+due)) return null;
+  const start = new Date(todayISO());
+  start.setHours(0, 0, 0, 0);
+  due.setHours(0, 0, 0, 0);
+  const diffMs = due - start; // positive => remaining, negative => overdue
+  return Math.round(diffMs / (1000 * 60 * 60 * 24));
+}
+
+function buildGmailLink({ to, subject, body }) {
+  const base = "https://mail.google.com/mail/?view=cm&fs=1";
+  const params = new URLSearchParams({
+    to: to || "",
+    su: subject || "",
+    body: body || "",
+  });
+  return `${base}&${params.toString()}`;
+}
+
+function formatReminderEmail(inv) {
+  const days = daysUntilDue(inv.dueDate);
+  const duePart = inv.dueDate
+    ? ` (Due Date: ${inv.dueDate}${
+        typeof days === "number" ? `, ${days < 0 ? `${Math.abs(days)} day(s) overdue` : `${days} day(s) remaining`}` : ""
+      })`
+    : "";
+  const lines = [
+    `Dear ${inv.customerName || "Sir/Madam"},`,
+    "",
+    `This is a gentle reminder regarding Invoice ${inv.invoiceNumber || ""}${duePart}.`,
+    `Amount Due: ${fmtInr(inv.totalAmount || 0)}`,
+    "",
+    "Kindly arrange the payment at your earliest convenience. If already paid, please ignore this email.",
+    "",
+    "Best regards,",
+    "ParthaSarthi Engineering and Training Services (PEATS)",
+    "parthasarthiconsultancy@gmail.com",
+  ];
+  return {
+    subject: `Payment Reminder — Invoice ${inv.invoiceNumber || ""}`,
+    body: lines.join("\n"),
+  };
+}
+
+/** Client rollup email with per-invoice lines */
+function formatClientReminderEmail({ customerName, customerEmail, invoices = [] }) {
+  const totalDue = round2(
+    invoices.reduce((s, it) => s + safeNum(it.remainingAmount), 0)
+  );
+  const lines = [
+    `Dear ${customerName || "Sir/Madam"},`,
+    "",
+    "This is a friendly reminder of pending invoices:",
+    "",
+    ...invoices.map((it) => {
+      const d = daysUntilDue(it.dueDate);
+      const tag = typeof d === "number" ? (d < 0 ? `${Math.abs(d)} day(s) overdue` : `${d} day(s) remaining`) : "—";
+      return `• ${it.invoiceNumber} — Due: ${it.dueDate || "—"} — Amount Due: ${fmtInr(it.remainingAmount)} (${tag})`;
+    }),
+    "",
+    `Total Pending: ${fmtInr(totalDue)}`,
+    "",
+    "Thank you.",
+    "",
+    "Best regards,",
+    "ParthaSarthi Engineering and Training Services (PEATS)",
+    "parthasarthiconsultancy@gmail.com",
+  ];
+  return {
+    to: customerEmail || "",
+    subject: `Payment Reminder — ${customerName || "Client"} (${invoices.length} invoice${invoices.length !== 1 ? "s" : ""})`,
+    body: lines.join("\n"),
+  };
+}
+
+// Invoice number generator — PINV/YYYY/MM/DD980001 (per day; start 980001)
 function nextInvoiceNumberForDate(dateStr, existingInvoices = []) {
   if (!dateStr) {
-    const today = new Date();
-    const yyyy = String(today.getFullYear());
-    const mm = String(today.getMonth() + 1).padStart(2, "0");
-    const dd = String(today.getDate()).padStart(2, "0");
+    const t = new Date();
+    const yyyy = String(t.getFullYear());
+    const mm = String(t.getMonth() + 1).padStart(2, "0");
+    const dd = String(t.getDate()).padStart(2, "0");
     return `PINV/${yyyy}/${mm}/${dd}${980001}`;
   }
   const yyyy = dateStr.slice(0, 4);
   const mm = dateStr.slice(5, 7);
   const dd = dateStr.slice(8, 10);
   const prefix = `PINV/${yyyy}/${mm}/${dd}`;
-
   const seqs = existingInvoices
     .map((inv) => inv?.invoiceNumber)
     .filter((n) => typeof n === "string" && n.startsWith(prefix))
@@ -61,7 +150,6 @@ function nextInvoiceNumberForDate(dateStr, existingInvoices = []) {
       return m ? parseInt(m[1], 10) : null;
     })
     .filter((x) => x !== null);
-
   const base = 980001;
   const next = seqs.length ? Math.max(...seqs) + 1 : base;
   return `${prefix}${next}`;
@@ -114,16 +202,34 @@ export default function App() {
   const [editingCustomer, setEditingCustomer] = useState(null);
   const [xlsxReady, setXlsxReady] = useState(!!window.XLSX);
 
-  // Load SheetJS at runtime
+  // Load SheetJS robustly (with fallback)
   useEffect(() => {
-    if (window.XLSX) return;
-    const script = document.createElement("script");
-    script.src = "https://cdn.sheetjs.com/xlsx-0.20.1/package/xlsx.full.min.js";
-    script.async = true;
-    script.onload = () => setXlsxReady(true);
-    script.onerror = () => console.error("Failed to load XLSX library");
-    document.head.appendChild(script);
-    return () => script.remove();
+    if (window.XLSX) {
+      setXlsxReady(true);
+      return;
+    }
+    function addScript(src, onload) {
+      const s = document.createElement("script");
+      s.src = src;
+      s.async = true;
+      s.onload = onload;
+      s.onerror = () => console.error("Failed to load", src);
+      document.head.appendChild(s);
+      return s;
+    }
+    const primary = addScript("https://cdn.sheetjs.com/xlsx-0.20.1/package/xlsx.full.min.js", () =>
+      setXlsxReady(!!window.XLSX)
+    );
+    const t = setTimeout(() => {
+      if (!window.XLSX)
+        addScript("https://unpkg.com/xlsx@0.20.1/dist/xlsx.full.min.js", () =>
+          setXlsxReady(!!window.XLSX)
+        );
+    }, 2000);
+    return () => {
+      primary && primary.remove();
+      clearTimeout(t);
+    };
   }, []);
 
   // Persist to localStorage
@@ -139,7 +245,6 @@ export default function App() {
   const saveData = (type, data) => {
     const id = data.id || idGen();
     const finalData = { ...data, id };
-
     if (type === "invoice") {
       setInvoices((prev) => {
         const exists = prev.some((i) => i.id === id);
@@ -157,6 +262,11 @@ export default function App() {
   const deleteData = (type, id) => {
     if (type === "invoice") setInvoices((prev) => prev.filter((i) => i.id !== id));
     if (type === "customer") setCustomers((prev) => prev.filter((c) => c.id !== id));
+  };
+
+  // Quick in-place invoice updater (for inline status change)
+  const quickUpdateInvoice = (patched) => {
+    setInvoices((prev) => prev.map((x) => (x.id === patched.id ? patched : x)));
   };
 
   const duplicateInvoice = (invoice) => {
@@ -187,6 +297,7 @@ export default function App() {
             }}
             onDelete={deleteData}
             onDuplicate={duplicateInvoice}
+            onQuickUpdate={quickUpdateInvoice}
           />
         );
       case "invoiceForm":
@@ -225,7 +336,7 @@ export default function App() {
           />
         );
       case "reports":
-        return <ReportsView invoices={invoices} xlsxReady={xlsxReady} />;
+        return <ReportsView invoices={invoices} customers={customers} xlsxReady={xlsxReady} />;
       default:
         return null;
     }
@@ -261,9 +372,7 @@ const Sidebar = ({ currentView, setView }) => {
             <button
               onClick={() => setView(n.id)}
               className={`flex items-center w-full p-3 rounded-xl transition-colors ${
-                currentView === n.id
-                  ? "bg-indigo-600 text-white shadow-md"
-                  : "text-gray-700 hover:bg-indigo-50 hover:text-indigo-700"
+                currentView === n.id ? "bg-indigo-600 text-white shadow-md" : "text-gray-700 hover:bg-indigo-50 hover:text-indigo-700"
               }`}
             >
               <Icon path={n.icon} className="w-6 h-6" />
@@ -272,7 +381,7 @@ const Sidebar = ({ currentView, setView }) => {
           </li>
         ))}
       </ul>
-      <div className="p-4 text-xs text-gray-400">v1.2</div>
+      <div className="p-4 text-xs text-gray-400">v1.5</div>
     </nav>
   );
 };
@@ -315,9 +424,11 @@ const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxRea
 
   const totals = useMemo(() => {
     const totalRevenue = sum(invoices, "totalAmount");
-    const outstanding = invoices
-      .filter((inv) => inv.status === "pending")
-      .reduce((acc, inv) => acc + safeNum(inv.totalAmount), 0);
+    const outstanding = invoices.reduce((acc, inv) => {
+      if (inv.status === "paid") return acc;
+      if (inv.status === "paid-half") return acc + round2(safeNum(inv.totalAmount) / 2);
+      return acc + safeNum(inv.totalAmount);
+    }, 0);
     return { totalRevenue, outstanding };
   }, [invoices]);
 
@@ -352,7 +463,15 @@ const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxRea
               customerName: row["Customer Name"] ?? row["customer_name"] ?? "",
               customerAddress: row["Customer Address"] ?? row["customer_address"] ?? "",
               customerGstin: row["Customer GSTIN"] ?? row["customer_gstin"] ?? "",
-              status: (row["Invoice Status"] ?? row["status"] ?? "pending").toLowerCase(),
+              customerEmail: row["Customer Email"] ?? row["customer_email"] ?? row["email"] ?? "",
+              status: String(row["Invoice Status"] ?? row["status"] ?? "pending").toLowerCase(),
+              poNumber: row["PO Number"] ?? row["po_number"] ?? "",
+              poImage: row["PO Image"] ?? row["po_image"] ?? "",
+              /* New PO value & GST fields */
+              poBaseValue: safeNum(row["PO Base Value"] ?? row["po_base_value"] ?? 0),
+              poGstMode: (row["PO GST Mode"] ?? row["po_gst_mode"] ?? "cgst_sgst").toLowerCase(),
+              poGstRate: safeNum(row["PO GST %"] ?? row["po_gst_percent"] ?? 0),
+              poGrossValue: safeNum(row["PO Gross Value"] ?? row["po_gross_value"] ?? 0),
               totalAmount: safeNum(row["Invoice Total"] ?? row["invoice_total"] ?? 0),
               items: [],
             };
@@ -362,12 +481,15 @@ const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxRea
           const igst = safeNum(row["IGST Rate (%)"] ?? row["igst"] ?? 0);
           const mode = igst > 0 ? "igst" : "cgst_sgst";
           const gstRate = igst > 0 ? igst : cgst + sgst;
+
           importedInvoices[invoiceId].items.push({
             description: row["Item Description"] ?? row["description"] ?? "",
             hsn: row["HSN/SAC"] ?? row["hsn"] ?? "",
             quantity: safeNum(row["Quantity"] ?? row["qty"] ?? 0),
             rate: safeNum(row["Rate"] ?? 0),
-            cgst, sgst, igst,
+            cgst,
+            sgst,
+            igst,
             gstMode: mode,
             gstRate: gstRate,
             total: safeNum(row["Total Item Value"] ?? row["line_total"] ?? 0),
@@ -380,7 +502,7 @@ const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxRea
               name: row["Customer Name"] ?? "",
               address: row["Customer Address"] ?? "",
               gstin: row["Customer GSTIN"] ?? "",
-              email: row["Customer Email"] ?? row["email"] ?? "",
+              email: row["Customer Email"] ?? row["customer_email"] ?? row["email"] ?? "",
               phone: row["Customer Phone"] ?? row["phone"] ?? "",
             };
           }
@@ -403,16 +525,14 @@ const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxRea
       <div className="bg-white p-5 rounded-xl shadow">
         <h2 className="text-lg font-semibold mb-1">Manage Your Data</h2>
         <p className="text-sm text-gray-600 mb-4">
-          Data autosaves in your browser. You can import/export Excel or JSON backups anytime.
+          Data autosaves in your browser. Import/Export Excel or JSON backups anytime.
         </p>
         <div className="flex flex-wrap gap-3">
           <button
             disabled={!xlsxReady}
             onClick={() => fileRef.current?.click()}
             className={`inline-flex items-center px-4 py-2 rounded-lg shadow ${
-              xlsxReady
-                ? "bg-blue-600 text-white hover:bg-blue-700"
-                : "bg-gray-200 text-gray-500 cursor-not-allowed"
+              xlsxReady ? "bg-blue-600 text-white hover:bg-blue-700" : "bg-gray-200 text-gray-500 cursor-not-allowed"
             }`}
           >
             <Icon path={ICONS.upload} className="w-5 h-5 mr-2" /> Import from Excel
@@ -420,7 +540,7 @@ const DashboardView = ({ invoices, customers, setInvoices, setCustomers, xlsxRea
           <input type="file" ref={fileRef} onChange={importExcel} className="hidden" accept=".xlsx,.xls" />
           <ExportExcelButton invoices={invoices} disabled={!xlsxReady} />
           <ExportJsonButton invoices={invoices} customers={customers} />
-          <ClearDataButton setInvoices={setInvoices} setCustomers={setCustomers} />
+          {/* Clear Data button removed as requested */}
         </div>
       </div>
 
@@ -459,12 +579,25 @@ const ExportExcelButton = ({ invoices, disabled }) => {
           "Customer Name": invoice.customerName,
           "Customer Address": invoice.customerAddress,
           "Customer GSTIN": invoice.customerGstin,
+          "Customer Email": invoice.customerEmail || "",
+          "Invoice Status": invoice.status,
+          "PO Number": invoice.poNumber || "",
+          "PO Image": invoice.poImage || "",
+          /* New PO columns */
+          "PO Base Value": round2(safeNum(invoice.poBaseValue || 0)),
+          "PO GST Mode": invoice.poGstMode || "cgst_sgst",
+          "PO GST %": round2(safeNum(invoice.poGstRate || 0)),
+          "PO Gross Value": round2(
+            safeNum(invoice.poBaseValue || 0) *
+              (1 + (invoice.poGstMode === "igst" ? safeNum(invoice.poGstRate || 0) : safeNum(invoice.poGstRate || 0)) / 100)
+          ),
           "Item Description": item.description,
           "HSN/SAC": item.hsn,
           Quantity: item.quantity,
           Rate: item.rate,
           "GST Mode": item.gstMode || (safeNum(item.igst) > 0 ? "igst" : "cgst_sgst"),
-          "GST %": item.gstRate ?? (safeNum(item.igst) > 0 ? safeNum(item.igst) : safeNum(item.cgst) + safeNum(item.sgst)),
+          "GST %":
+            item.gstRate ?? (safeNum(item.igst) > 0 ? safeNum(item.igst) : safeNum(item.cgst) + safeNum(item.sgst)),
           "Taxable Value": taxable,
           "CGST Rate (%)": item.cgst,
           "CGST Amount": cgstAmt,
@@ -474,7 +607,6 @@ const ExportExcelButton = ({ invoices, disabled }) => {
           "IGST Amount": igstAmt,
           "Total Item Value": round2(item.total),
           "Invoice Total": round2(invoice.totalAmount),
-          "Invoice Status": invoice.status,
         };
       })
     );
@@ -482,9 +614,10 @@ const ExportExcelButton = ({ invoices, disabled }) => {
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Invoices");
-
     const buf = XLSX.write(wb, { bookType: "xlsx", type: "array" });
-    const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;charset=UTF-8" });
+    const blob = new Blob([buf], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;charset=UTF-8",
+    });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -526,28 +659,38 @@ const ExportJsonButton = ({ invoices, customers }) => {
     }, 0);
   };
   return (
-    <button onClick={onClick} className="inline-flex items-center px-4 py-2 rounded-lg shadow bg-gray-800 text-white hover:bg-black">
+    <button
+      onClick={onClick}
+      className="inline-flex items-center px-4 py-2 rounded-lg shadow bg-gray-800 text-white hover:bg-black"
+    >
       <Icon path={ICONS.download} className="w-5 h-5 mr-2" /> Backup JSON
     </button>
   );
 };
 
-const ClearDataButton = ({ setInvoices, setCustomers }) => {
-  const clearAll = () => {
-    if (!window.confirm("This will clear all local data (invoices & customers). Continue?")) return;
-    setInvoices([]);
-    setCustomers([]);
-    localStorage.removeItem(LS_KEYS.invoices);
-    localStorage.removeItem(LS_KEYS.customers);
-  };
-  return (
-    <button onClick={clearAll} className="inline-flex items-center px-4 py-2 rounded-lg shadow bg-red-50 text-red-700 hover:bg-red-100">
-      <Icon path={ICONS.delete} className="w-5 h-5 mr-2" /> Clear Local Data
-    </button>
-  );
+/* helpers & storage */
+const Input = ({ label, ...props }) => (
+  <div>
+    <label className="mb-1 block text-sm text-gray-600">{label}</label>
+    <input {...props} className={`p-2 border rounded-lg w-full ${props.className || ""}`} />
+  </div>
+);
+
+const loadLS = (key, fallback) => {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+};
+const saveLS = (key, val) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(val));
+  } catch {}
 };
 /* ------------------------------ Invoices List ------------------------------ */
-const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate }) => {
+const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate, onQuickUpdate }) => {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("all");
   const [sortKey, setSortKey] = useState("invoiceDate");
@@ -594,11 +737,7 @@ const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate }) => {
   };
 
   const th = (label, key, width) => (
-    <th
-      className={`p-3 ${width ?? ""} cursor-pointer select-none whitespace-nowrap`}
-      onClick={() => toggleSort(key)}
-      title="Sort"
-    >
+    <th className={`p-3 ${width ?? ""} cursor-pointer select-none whitespace-nowrap`} onClick={() => toggleSort(key)} title="Sort">
       <div className="inline-flex items-center gap-1">
         {label}
         <span className="text-xs text-gray-400">{sortKey === key ? (sortDir === "asc" ? "▲" : "▼") : ""}</span>
@@ -624,6 +763,7 @@ const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate }) => {
           <select value={status} onChange={(e) => setStatus(e.target.value)} className="border rounded-lg px-3 py-2">
             <option value="all">All</option>
             <option value="pending">Pending</option>
+            <option value="paid-half">Paid-Half</option>
             <option value="paid">Paid</option>
           </select>
         </div>
@@ -642,33 +782,60 @@ const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate }) => {
             </tr>
           </thead>
           <tbody>
-            {pageData.map((inv) => (
-              <tr key={inv.id} className="border-b hover:bg-gray-50">
-                <td className="p-3 font-medium">{inv.invoiceNumber || "—"}</td>
-                <td className="p-3">{inv.customerName || "—"}</td>
-                <td className="p-3">{inv.invoiceDate || "—"}</td>
-                <td className="p-3">{fmtInr(safeNum(inv.totalAmount))}</td>
-                <td className="p-3">
-                  <span
-                    className={`px-2 py-1 text-xs font-semibold rounded-full ${
-                      inv.status === "paid"
-                        ? "bg-green-100 text-green-800"
-                        : "bg-amber-100 text-amber-800"
-                    }`}
-                  >
-                    {inv.status}
-                  </span>
-                </td>
-                <td className="p-3">
-                  <div className="flex items-center gap-1">
-                    <IconBtn title="Edit" onClick={() => onEdit(inv)} icon={ICONS.edit} className="text-blue-600 hover:bg-blue-50" />
-                    <IconBtn title="Duplicate" onClick={() => onDuplicate(inv)} icon={ICONS.duplicate} className="text-purple-600 hover:bg-purple-50" />
-                    <IconBtn title="Delete" onClick={() => handleDelete(inv.id)} icon={ICONS.delete} className="text-red-600 hover:bg-red-50" />
-                    <IconBtn title="Print" onClick={() => handlePrint(inv)} icon={ICONS.print} className="text-gray-700 hover:bg-gray-100" />
-                  </div>
-                </td>
-              </tr>
-            ))}
+            {pageData.map((inv) => {
+              const { subject, body } = formatReminderEmail(inv);
+              const mailto = buildGmailLink({
+                to: inv.customerEmail || "",
+                subject,
+                body,
+              });
+              return (
+                <tr key={inv.id} className="border-b hover:bg-gray-50">
+                  <td className="p-3 font-medium">{inv.invoiceNumber || "—"}</td>
+                  <td className="p-3">{inv.customerName || "—"}</td>
+                  <td className="p-3">{inv.invoiceDate || "—"}</td>
+                  <td className="p-3">{fmtInr(safeNum(inv.totalAmount))}</td>
+                  <td className="p-3">
+                    <select
+                      value={inv.status}
+                      onChange={(e) => onQuickUpdate({ ...inv, status: e.target.value })}
+                      className={`px-2 py-1 border rounded-lg ${
+                        inv.status === "paid"
+                          ? "bg-green-50 text-green-700"
+                          : inv.status === "paid-half"
+                          ? "bg-blue-50 text-blue-700"
+                          : "bg-amber-50 text-amber-700"
+                      }`}
+                    >
+                      <option value="pending">Pending</option>
+                      <option value="paid-half">Paid-Half</option>
+                      <option value="paid">Paid</option>
+                    </select>
+                  </td>
+                  <td className="p-3">
+                    <div className="flex items-center gap-1">
+                      <IconBtn title="Edit" onClick={() => onEdit(inv)} icon={ICONS.edit} className="text-blue-600 hover:bg-blue-50" />
+                      <IconBtn
+                        title="Duplicate"
+                        onClick={() => onDuplicate(inv)}
+                        icon={ICONS.duplicate}
+                        className="text-purple-600 hover:bg-purple-50"
+                      />
+                      <IconBtn
+                        title="Delete"
+                        onClick={() => handleDelete(inv.id)}
+                        icon={ICONS.delete}
+                        className="text-red-600 hover:bg-red-50"
+                      />
+                      <a href={mailto} target="_blank" rel="noreferrer" title="Send Reminder" className="p-2 rounded-lg text-amber-700 hover:bg-amber-50">
+                        ✉
+                      </a>
+                      <IconBtn title="Print" onClick={() => handlePrint(inv)} icon={ICONS.print} className="text-gray-700 hover:bg-gray-100" />
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
             {pageData.length === 0 && (
               <tr>
                 <td colSpan={6} className="p-6 text-center text-gray-500">
@@ -687,11 +854,7 @@ const InvoiceListView = ({ invoices, onEdit, onDelete, onDuplicate }) => {
 
 const Pagination = ({ page, totalPages, onPageChange }) => (
   <div className="flex items-center justify-end gap-2 mt-4">
-    <button
-      onClick={() => onPageChange(Math.max(1, page - 1))}
-      className="px-3 py-1 border rounded-lg disabled:opacity-50"
-      disabled={page === 1}
-    >
+    <button onClick={() => onPageChange(Math.max(1, page - 1))} className="px-3 py-1 border rounded-lg disabled:opacity-50" disabled={page === 1}>
       Prev
     </button>
     <span className="text-sm text-gray-600">
@@ -765,7 +928,9 @@ const CustomerListView = ({ customers, onEdit, onDelete }) => {
             ))}
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={4} className="p-6 text-center text-gray-500">No customers found.</td>
+                <td colSpan={4} className="p-6 text-center text-gray-500">
+                  No customers found.
+                </td>
               </tr>
             )}
           </tbody>
@@ -776,109 +941,267 @@ const CustomerListView = ({ customers, onEdit, onDelete }) => {
 };
 
 /* ------------------------------ Reports ------------------------------ */
-const ReportsView = ({ invoices, xlsxReady }) => {
-  const monthly = useMemo(() => {
-    const map = new Map();
-    invoices.forEach((inv) => {
-      const m = new Date(inv.invoiceDate);
-      if (isNaN(m)) return;
-      const key = m.toLocaleString("en-IN", { month: "long", year: "numeric" });
-      if (!map.has(key)) map.set(key, { total: 0, count: 0 });
-      map.get(key).total += safeNum(inv.totalAmount);
-      map.get(key).count += 1;
-    });
-    return Array.from(map.entries()).sort((a, b) => new Date(a[0]) - new Date(b[0]));
+const ReportsView = ({ invoices, customers, xlsxReady }) => {
+  const totals = useMemo(() => {
+    const received = invoices.reduce((s, i) => {
+      if (i.status === "paid") return s + safeNum(i.totalAmount);
+      if (i.status === "paid-half") return s + round2(safeNum(i.totalAmount) / 2);
+      return s;
+    }, 0);
+    const remaining = invoices.reduce((s, i) => {
+      if (i.status === "paid") return s;
+      if (i.status === "paid-half") return s + round2(safeNum(i.totalAmount) / 2);
+      return s + safeNum(i.totalAmount);
+    }, 0);
+    return { received: round2(received), remaining: round2(remaining) };
   }, [invoices]);
 
-  const gstTotals = useMemo(() => {
-    const allItems = invoices.flatMap((i) => i.items || []);
-    const cgst = sum(allItems.map((it) => calcItem(it)), "cgstAmt");
-    const sgst = sum(allItems.map((it) => calcItem(it)), "sgstAmt");
-    const igst = sum(allItems.map((it) => calcItem(it)), "igstAmt");
-    return { cgst: round2(cgst), sgst: round2(sgst), igst: round2(igst) };
-  }, [invoices]);
+  const pendingRows = useMemo(() => {
+    return invoices
+      .filter((i) => i.status !== "paid")
+      .map((i) => {
+        const d = daysUntilDue(i.dueDate);
+        let email = i.customerEmail || "";
+        if (!email && i.customerId) {
+          const c = customers.find((x) => x.id === i.customerId);
+          email = c?.email || "";
+        }
+        const remainingAmount = i.status === "paid-half" ? round2(safeNum(i.totalAmount) / 2) : round2(safeNum(i.totalAmount));
+        return {
+          id: i.id,
+          invoiceNumber: i.invoiceNumber,
+          customerId: i.customerId,
+          customerName: i.customerName,
+          customerEmail: email,
+          dueDate: i.dueDate || "—",
+          amount: round2(safeNum(i.totalAmount)),
+          remainingAmount,
+          days: d, // positive: remaining; negative: overdue
+        };
+      })
+      .sort((a, b) => {
+        const da = a.days ?? 9999, db = b.days ?? 9999;
+        return da - db; // most overdue first
+      });
+  }, [invoices, customers]);
+
+  // Roll up per-client remaining & prepare reminder links
+  const clientSummary = useMemo(() => {
+    const byClient = new Map();
+    pendingRows.forEach((r) => {
+      const key = r.customerEmail || r.customerName || r.customerId || "Unknown";
+      if (!byClient.has(key)) {
+        byClient.set(key, {
+          customerId: r.customerId,
+          customerName: r.customerName,
+          customerEmail: r.customerEmail,
+          invoices: [],
+          totalRemaining: 0,
+        });
+      }
+      const bucket = byClient.get(key);
+      bucket.invoices.push(r);
+      bucket.totalRemaining = round2(bucket.totalRemaining + r.remainingAmount);
+    });
+    return Array.from(byClient.values()).sort((a, b) => b.totalRemaining - a.totalRemaining);
+  }, [pendingRows]);
 
   return (
-    <div className="bg-white p-5 rounded-xl shadow space-y-6">
+    <div className="bg-white p-5 rounded-xl shadow space-y-8">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold">GST & Sales Reports</h2>
         <ExportExcelButton invoices={invoices} disabled={!xlsxReady} />
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <StatCard title="Total CGST" value={fmtInr(gstTotals.cgst)} />
-        <StatCard title="Total SGST" value={fmtInr(gstTotals.sgst)} />
-        <StatCard title="Total IGST" value={fmtInr(gstTotals.igst)} />
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <StatCard title="Amount Received" value={fmtInr(totals.received)} />
+        <StatCard title="Amount Remaining" value={fmtInr(totals.remaining)} />
       </div>
 
-      <div className="overflow-x-auto">
-        <table className="w-full text-left text-sm">
-          <thead>
-            <tr className="bg-gray-50 border-b text-gray-600">
-              <th className="p-3">Month</th>
-              <th className="p-3">Invoices Issued</th>
-              <th className="p-3">Total Sales</th>
-            </tr>
-          </thead>
-          <tbody>
-            {monthly.map(([month, data]) => (
-              <tr key={month} className="border-b hover:bg-gray-50">
-                <td className="p-3">{month}</td>
-                <td className="p-3">{data.count}</td>
-                <td className="p-3">{fmtInr(round2(data.total))}</td>
+      {/* Client Summary */}
+      <div>
+        <h3 className="font-semibold mb-2">Client Summary — Remaining & Reminders</h3>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="bg-gray-50 border-b text-gray-600">
+                <th className="p-3">Client</th>
+                <th className="p-3">Email</th>
+                <th className="p-3">Pending Invoices</th>
+                <th className="p-3">Total Remaining</th>
+                <th className="p-3">Reminder</th>
               </tr>
-            ))}
-            {monthly.length === 0 && (
-              <tr>
-                <td colSpan={3} className="p-6 text-center text-gray-500">No data yet.</td>
+            </thead>
+            <tbody>
+              {clientSummary.map((c) => {
+                const emailPayload = formatClientReminderEmail({
+                  customerName: c.customerName,
+                  customerEmail: c.customerEmail,
+                  invoices: c.invoices,
+                });
+                const link = buildGmailLink(emailPayload);
+                return (
+                  <tr key={`${c.customerId}-${c.customerEmail}`} className="border-b hover:bg-gray-50">
+                    <td className="p-3 font-medium">{c.customerName || "—"}</td>
+                    <td className="p-3">{c.customerEmail || "—"}</td>
+                    <td className="p-3">{c.invoices.map((x) => x.invoiceNumber).join(", ")}</td>
+                    <td className="p-3">{fmtInr(c.totalRemaining)}</td>
+                    <td className="p-3">
+                      <a href={link} target="_blank" rel="noreferrer" className="px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700">
+                        Send Summary Reminder
+                      </a>
+                    </td>
+                  </tr>
+                );
+              })}
+              {clientSummary.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="p-6 text-center text-gray-500">
+                    No pending payments 🎉
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Pending Invoices (Aging) */}
+      <div>
+        <h3 className="font-semibold mb-2">Pending Invoices (Aging)</h3>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="bg-gray-50 border-b text-gray-600">
+                <th className="p-3">Invoice #</th>
+                <th className="p-3">Customer</th>
+                <th className="p-3">Email</th>
+                <th className="p-3">Due Date</th>
+                <th className="p-3">Days</th>
+                <th className="p-3">Amount</th>
+                <th className="p-3">Remaining</th>
+                <th className="p-3">Reminder</th>
               </tr>
-            )}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {pendingRows.map((r) => {
+                const { subject, body } = formatReminderEmail({
+                  invoiceNumber: r.invoiceNumber,
+                  dueDate: r.dueDate === "—" ? "" : r.dueDate,
+                  customerName: r.customerName,
+                  totalAmount: r.remainingAmount,
+                });
+                const link = buildGmailLink({ to: r.customerEmail || "", subject, body });
+                const badge =
+                  typeof r.days === "number" ? (
+                    r.days < 0 ? (
+                      <span className="px-2 py-1 rounded-full text-xs bg-red-100 text-red-800">
+                        {Math.abs(r.days)} day(s) overdue
+                      </span>
+                    ) : (
+                      <span className="px-2 py-1 rounded-full text-xs bg-amber-100 text-amber-800">
+                        {r.days} day(s) remaining
+                      </span>
+                    )
+                  ) : (
+                    <span className="px-2 py-1 rounded-full text-xs bg-gray-100 text-gray-700">—</span>
+                  );
+
+                return (
+                  <tr key={r.id} className="border-b hover:bg-gray-50">
+                    <td className="p-3 font-medium">{r.invoiceNumber}</td>
+                    <td className="p-3">{r.customerName}</td>
+                    <td className="p-3">{r.customerEmail || "—"}</td>
+                    <td className="p-3">{r.dueDate}</td>
+                    <td className="p-3">{badge}</td>
+                    <td className="p-3">{fmtInr(r.amount)}</td>
+                    <td className="p-3">{fmtInr(r.remainingAmount)}</td>
+                    <td className="p-3">
+                      <a href={link} target="_blank" rel="noreferrer" className="px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700">
+                        Send Reminder
+                      </a>
+                    </td>
+                  </tr>
+                );
+              })}
+              {pendingRows.length === 0 && (
+                <tr>
+                  <td colSpan={8} className="p-6 text-center text-gray-500">
+                    No pending invoices 🎉
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
 };
 
+/* ------------------------------ Sort helper ------------------------------ */
+const cmp = (a, b, key, dir) => {
+  const va = a?.[key] ?? "";
+  const vb = b?.[key] ?? "";
+  if (va < vb) return dir === "asc" ? -1 : 1;
+  if (va > vb) return dir === "asc" ? 1 : -1;
+  return 0;
+};
 /* ------------------------------ Forms ------------------------------ */
 const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice }) => {
-  const todayISO = new Date().toISOString().split("T")[0];
   const [touchedNumber, setTouchedNumber] = useState(false);
   const [invoice, setInvoice] = useState(() => {
-    const initDate = existingInvoice?.invoiceDate || todayISO;
+    const initDate = existingInvoice?.invoiceDate || todayISO();
     const defaultNumber = existingInvoice?.invoiceNumber || nextInvoiceNumberForDate(initDate, allInvoices);
+    const initialDue = existingInvoice?.dueDate || addDaysISO(initDate, 45); // +45 days
     return {
       id: existingInvoice?.id || null,
       invoiceNumber: defaultNumber,
       invoiceDate: initDate,
-      dueDate: existingInvoice?.dueDate || "",
+      dueDate: initialDue,
       customerId: existingInvoice?.customerId || "",
       customerName: existingInvoice?.customerName || "",
       customerAddress: existingInvoice?.customerAddress || "",
       customerGstin: existingInvoice?.customerGstin || "",
+      customerEmail: existingInvoice?.customerEmail || "",
+      /* PO fields */
+      poNumber: existingInvoice?.poNumber || "",
+      poImage: existingInvoice?.poImage || "",
+      poBaseValue: safeNum(existingInvoice?.poBaseValue || 0),
+      poGstMode: existingInvoice?.poGstMode || "cgst_sgst",
+      poGstRate: safeNum(existingInvoice?.poGstRate || 18),
       items: existingInvoice?.items?.length
         ? existingInvoice.items
         : [
-            { description: "", hsn: "", quantity: 1, rate: 0, cgst: 0, sgst: 0, igst: 0, gstMode: "cgst_sgst", gstRate: 18, total: 0 },
+            {
+              description: "",
+              hsn: "",
+              quantity: 1,
+              rate: 0,
+              cgst: 0,
+              sgst: 0,
+              igst: 0,
+              gstMode: "cgst_sgst",
+              gstRate: 18,
+              total: 0,
+            },
           ],
       status: existingInvoice?.status || "pending",
     };
   });
 
-  // Re-generate invoice number when date changes (only for new + not manually touched)
+  // Auto-regenerate invoice number on date change (only for new & untouched)
   useEffect(() => {
     if (existingInvoice?.id) return;
     if (touchedNumber) return;
     const next = nextInvoiceNumberForDate(invoice.invoiceDate, allInvoices);
-    setInvoice((prev) => ({ ...prev, invoiceNumber: next }));
+    setInvoice((prev) => ({ ...prev, invoiceNumber: next, dueDate: addDaysISO(invoice.invoiceDate, 45) }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [invoice.invoiceDate, allInvoices]);
 
   const subTotal = round2(sum(invoice.items.map(calcItem), "taxable"));
   const totalTax = round2(
-    sum(invoice.items.map(calcItem), "cgstAmt") +
-      sum(invoice.items.map(calcItem), "sgstAmt") +
-      sum(invoice.items.map(calcItem), "igstAmt")
+    sum(invoice.items.map(calcItem), "cgstAmt") + sum(invoice.items.map(calcItem), "sgstAmt") + sum(invoice.items.map(calcItem), "igstAmt")
   );
   const totalAmount = round2(subTotal + totalTax);
 
@@ -891,6 +1214,7 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
       customerName: c.name || "",
       customerAddress: c.address || "",
       customerGstin: c.gstin || "",
+      customerEmail: c.email || "",
     }));
   };
 
@@ -898,7 +1222,8 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
     const rate = safeNum(it.gstRate);
     if ((it.gstMode || "cgst_sgst") === "igst") {
       it.igst = round2(rate);
-      it.cgst = 0; it.sgst = 0;
+      it.cgst = 0;
+      it.sgst = 0;
     } else {
       it.cgst = round2(rate / 2);
       it.sgst = round2(rate / 2);
@@ -918,13 +1243,18 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
 
       if (field === "gstMode") it.gstMode = value;
       if (field === "gstRate" || field === "gstMode") {
-        it.gstRate = field === "gstRate" ? safeNum(value) : (it.gstRate ?? 0);
+        it.gstRate = field === "gstRate" ? safeNum(value) : it.gstRate ?? 0;
         it = applyGstModeRate(it);
       }
 
       if (["cgst", "sgst", "igst"].includes(field)) {
-        if (it.igst > 0) { it.gstMode = "igst"; it.gstRate = round2(it.igst); }
-        else { it.gstMode = "cgst_sgst"; it.gstRate = round2(safeNum(it.cgst) + safeNum(it.sgst)); }
+        if (it.igst > 0) {
+          it.gstMode = "igst";
+          it.gstRate = round2(it.igst);
+        } else {
+          it.gstMode = "cgst_sgst";
+          it.gstRate = round2(safeNum(it.cgst) + safeNum(it.sgst));
+        }
       }
 
       const { total } = calcItem(it);
@@ -944,8 +1274,7 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
       ],
     }));
 
-  const removeItem = (idx) =>
-    setInvoice((prev) => ({ ...prev, items: prev.items.filter((_, i) => i !== idx) }));
+  const removeItem = (idx) => setInvoice((prev) => ({ ...prev, items: prev.items.filter((_, i) => i !== idx) }));
 
   const submit = (e) => {
     e.preventDefault();
@@ -957,6 +1286,15 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
     onSave({ ...invoice, totalAmount });
   };
 
+  const poGrossValue = round2(
+    safeNum(invoice.poBaseValue || 0) * (1 + safeNum(invoice.poGstRate || 0) / 100)
+  );
+
+  const gstSplitHint = (rate, mode) => {
+    rate = safeNum(rate);
+    return mode === "igst" ? `IGST ${rate}%` : `CGST ${(rate/2).toFixed(2)}% + SGST ${(rate/2).toFixed(2)}%`;
+  };
+
   return (
     <form onSubmit={submit} className="bg-white p-6 rounded-xl shadow space-y-6">
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -964,13 +1302,24 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
           <label className="mb-1 block text-sm text-gray-600">Invoice #</label>
           <input
             value={invoice.invoiceNumber}
-            onChange={(e) => { setTouchedNumber(true); setInvoice({ ...invoice, invoiceNumber: e.target.value }); }}
+            onChange={(e) => {
+              setTouchedNumber(true);
+              setInvoice({ ...invoice, invoiceNumber: e.target.value });
+            }}
             className="p-2 border rounded-lg w-full"
             required
           />
-          <p className="text-xs text-gray-500 mt-1">Format: <code>PINV/YYYY/MM/DD980001</code></p>
+          <p className="text-xs text-gray-500 mt-1">
+            Format: <code>PINV/YYYY/MM/DD980001</code>
+          </p>
         </div>
-        <Input label="Invoice Date" type="date" value={invoice.invoiceDate} onChange={(e) => setInvoice({ ...invoice, invoiceDate: e.target.value })} required />
+        <Input
+          label="Invoice Date"
+          type="date"
+          value={invoice.invoiceDate}
+          onChange={(e) => setInvoice({ ...invoice, invoiceDate: e.target.value, dueDate: addDaysISO(e.target.value, 45) })}
+          required
+        />
         <Input label="Due Date" type="date" value={invoice.dueDate} onChange={(e) => setInvoice({ ...invoice, dueDate: e.target.value })} />
       </div>
 
@@ -982,16 +1331,98 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
             <select value={invoice.customerId} onChange={onSelectCustomer} className="p-2 border rounded-lg w-full bg-white">
               <option value="">— Select Existing —</option>
               {customers.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
               ))}
             </select>
           </div>
           <Input label="Customer Name" value={invoice.customerName} onChange={(e) => setInvoice({ ...invoice, customerName: e.target.value })} required />
           <Input label="Customer Address" value={invoice.customerAddress} onChange={(e) => setInvoice({ ...invoice, customerAddress: e.target.value })} />
           <Input label="Customer GSTIN" value={invoice.customerGstin} onChange={(e) => setInvoice({ ...invoice, customerGstin: e.target.value.toUpperCase() })} />
+          <Input label="Customer Email" value={invoice.customerEmail} onChange={(e) => setInvoice({ ...invoice, customerEmail: e.target.value })} />
         </div>
       </div>
 
+      {/* PO & Status */}
+      <div className="border-t pt-4">
+        <h3 className="text-lg font-semibold mb-3">PO & Status</h3>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <Input label="PO Number" value={invoice.poNumber} onChange={(e) => setInvoice({ ...invoice, poNumber: e.target.value })} />
+          <div>
+            <label className="mb-1 block text-sm text-gray-600">PO Image (PNG/JPG)</label>
+            <input
+              type="file"
+              accept="image/*"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (!f) return;
+                const reader = new FileReader();
+                reader.onload = (ev) => setInvoice((prev) => ({ ...prev, poImage: String(ev.target.result) }));
+                reader.readAsDataURL(f);
+              }}
+              className="p-2 border rounded-lg w-full bg-white"
+            />
+            {invoice.poImage && (
+              <a href={invoice.poImage} target="_blank" rel="noreferrer" className="text-indigo-600 text-sm mt-1 inline-block">
+                Preview PO Image
+              </a>
+            )}
+          </div>
+          <div>
+            <label className="mb-1 block text-sm text-gray-600">Invoice Status</label>
+            <select
+              value={invoice.status}
+              onChange={(e) => setInvoice({ ...invoice, status: e.target.value })}
+              className="p-2 border rounded-lg w-full bg-white"
+            >
+              <option value="pending">Pending</option>
+              <option value="paid-half">Paid-Half</option>
+              <option value="paid">Paid</option>
+            </select>
+          </div>
+        </div>
+
+        {/* PO Value + GST */}
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4">
+          <Input
+            label="PO Base Value (Taxable)"
+            type="number"
+            value={invoice.poBaseValue}
+            onChange={(e) => setInvoice({ ...invoice, poBaseValue: safeNum(e.target.value) })}
+          />
+          <div>
+            <label className="mb-1 block text-sm text-gray-600">PO GST Mode</label>
+            <select
+              value={invoice.poGstMode}
+              onChange={(e) => setInvoice({ ...invoice, poGstMode: e.target.value })}
+              className="p-2 border rounded-lg w-full bg-white"
+            >
+              <option value="cgst_sgst">CGST+SGST</option>
+              <option value="igst">IGST</option>
+            </select>
+            <div className="text-xs text-gray-500 mt-1">{gstSplitHint(invoice.poGstRate, invoice.poGstMode)}</div>
+          </div>
+          <div>
+            <label className="mb-1 block text-sm text-gray-600">PO GST %</label>
+            <select
+              value={invoice.poGstRate}
+              onChange={(e) => setInvoice({ ...invoice, poGstRate: safeNum(e.target.value) })}
+              className="p-2 border rounded-lg w-full bg-white"
+            >
+              {GST_RATES.map((r) => (
+                <option key={`po-${r}`} value={r}>{r}%</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="mb-1 block text-sm text-gray-600">PO Gross (Auto)</label>
+            <input value={poGrossValue} readOnly className="p-2 border rounded-lg w-full bg-gray-50" />
+          </div>
+        </div>
+      </div>
+
+      {/* Items */}
       <div className="border-t pt-4">
         <h3 className="text-lg font-semibold mb-3">Invoice Items</h3>
         <div className="overflow-x-auto">
@@ -1004,6 +1435,8 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
                 <th className="p-2">Rate</th>
                 <th className="p-2">GST Mode</th>
                 <th className="p-2">GST %</th>
+                <th className="p-2">GST %</th>
+                <th className="p-2">Tax Split</th>
                 <th className="p-2">Total</th>
                 <th className="p-2">Action</th>
               </tr>
@@ -1011,6 +1444,11 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
             <tbody>
               {invoice.items.map((it, idx) => {
                 const { total } = calcItem(it);
+                const splitText =
+                  it.gstMode === "igst"
+                    ? `IGST ${safeNum(it.gstRate)}%`
+                    : `CGST ${(safeNum(it.gstRate) / 2).toFixed(2)}% + SGST ${(safeNum(it.gstRate) / 2).toFixed(2)}%`;
+
                 return (
                   <tr key={idx} className="border-t">
                     <td className="p-2">
@@ -1033,6 +1471,8 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
                         value={it.quantity}
                         onChange={(e) => updateItem(idx, "quantity", e.target.value)}
                         className="p-1 border rounded w-16"
+                        min="0"
+                        step="0.01"
                       />
                     </td>
                     <td className="p-2">
@@ -1041,6 +1481,8 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
                         value={it.rate}
                         onChange={(e) => updateItem(idx, "rate", e.target.value)}
                         className="p-1 border rounded w-20"
+                        min="0"
+                        step="0.01"
                       />
                     </td>
                     <td className="p-2">
@@ -1059,14 +1501,27 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
                         onChange={(e) => updateItem(idx, "gstRate", e.target.value)}
                         className="p-1 border rounded"
                       >
-                        {GST_RATES.map((r) => (
-                          <option key={r} value={r}>{r}%</option>
+                        {[2.5, 5, 8, 9, 18, 28].map((r) => (
+                          <option key={`item-gst-${idx}-${r}`} value={r}>
+                            {r}%
+                          </option>
                         ))}
                       </select>
                     </td>
+                    <td className="p-2 text-xs text-gray-600">
+                      {splitText}
+                    </td>
                     <td className="p-2">{fmtInr(total)}</td>
                     <td className="p-2">
-                      <button type="button" onClick={() => removeItem(idx)} className="text-red-600">✕</button>
+                      <button
+                        type="button"
+                        onClick={() => removeItem(idx)}
+                        className="text-red-600 hover:underline"
+                        aria-label="Remove item"
+                        title="Remove item"
+                      >
+                        ✕
+                      </button>
                     </td>
                   </tr>
                 );
@@ -1074,163 +1529,46 @@ const InvoiceForm = ({ customers, allInvoices, onSave, onCancel, existingInvoice
             </tbody>
           </table>
         </div>
-        <button type="button" onClick={addItem} className="mt-2 px-3 py-1 bg-gray-200 rounded hover:bg-gray-300">+ Add Item</button>
+        <button
+          type="button"
+          onClick={addItem}
+          className="mt-2 px-3 py-1 bg-gray-200 rounded hover:bg-gray-300"
+        >
+          + Add Item
+        </button>
       </div>
-
+      {/* Totals */}
       <div className="border-t pt-4 space-y-2">
         <div className="flex justify-between text-sm">
-          <span>Sub Total:</span><span>{fmtInr(subTotal)}</span>
+          <span>Sub Total:</span>
+          <span>{fmtInr(subTotal)}</span>
         </div>
         <div className="flex justify-between text-sm">
-          <span>Total Tax:</span><span>{fmtInr(totalTax)}</span>
+          <span>Total Tax:</span>
+          <span>{fmtInr(totalTax)}</span>
         </div>
         <div className="flex justify-between font-bold">
-          <span>Grand Total:</span><span>{fmtInr(totalAmount)}</span>
+          <span>Grand Total:</span>
+          <span>{fmtInr(totalAmount)}</span>
         </div>
       </div>
 
+      {/* Actions */}
       <div className="flex justify-end gap-3 pt-4">
-        <button type="button" onClick={onCancel} className="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Cancel</button>
-        <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700">Save Invoice</button>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300"
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700"
+        >
+          Save Invoice
+        </button>
       </div>
     </form>
   );
 };
-
-const CustomerForm = ({ onSave, onCancel, existingCustomer }) => {
-  const [c, setC] = useState(() => existingCustomer || { id: null, name: "", email: "", phone: "", address: "", gstin: "" });
-  const submit = (e) => {
-    e.preventDefault();
-    if (!c.name) return alert("Name is required");
-    if (c.gstin && !GSTIN_REGEX.test(c.gstin)) {
-      if (!window.confirm("GSTIN does not look valid. Save anyway?")) return;
-    }
-    onSave(c);
-  };
-  return (
-    <form onSubmit={submit} className="bg-white p-6 rounded-xl shadow space-y-4">
-      <Input label="Customer Name" value={c.name} onChange={(e) => setC({ ...c, name: e.target.value })} required />
-      <Input label="Email" value={c.email} onChange={(e) => setC({ ...c, email: e.target.value })} />
-      <Input label="Phone" value={c.phone} onChange={(e) => setC({ ...c, phone: e.target.value })} />
-      <Input label="Address" value={c.address} onChange={(e) => setC({ ...c, address: e.target.value })} />
-      <Input label="GSTIN" value={c.gstin} onChange={(e) => setC({ ...c, gstin: e.target.value.toUpperCase() })} />
-      <div className="flex justify-end gap-3">
-        <button type="button" onClick={onCancel} className="px-4 py-2 bg-gray-200 rounded">Cancel</button>
-        <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded">Save</button>
-      </div>
-    </form>
-  );
-};
-
-/* ------------------------------ Shared Helpers ------------------------------ */
-const Input = ({ label, ...props }) => (
-  <div>
-    <label className="mb-1 block text-sm text-gray-600">{label}</label>
-    <input {...props} className="p-2 border rounded-lg w-full" />
-  </div>
-);
-
-const loadLS = (key, fallback) => {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch {
-    return fallback;
-  }
-};
-const saveLS = (key, val) => {
-  try {
-    localStorage.setItem(key, JSON.stringify(val));
-  } catch {}
-};
-
-const cmp = (a, b, key, dir) => {
-  const va = a?.[key] ?? "";
-  const vb = b?.[key] ?? "";
-  if (va < vb) return dir === "asc" ? -1 : 1;
-  if (va > vb) return dir === "asc" ? 1 : -1;
-  return 0;
-};
-
-/* ------------------------------ Printable Invoice (A4) ------------------------------ */
-function generatePrintableInvoice(inv) {
-  const itemsHtml = (inv.items || [])
-    .map((it) => {
-      const { taxable, cgstAmt, sgstAmt, igstAmt, total } = calcItem(it);
-      return `<tr>
-        <td>${it.description || ""}</td>
-        <td>${it.hsn || ""}</td>
-        <td style="text-align:right">${it.quantity || 0}</td>
-        <td style="text-align:right">${it.rate || 0}</td>
-        <td style="text-align:right">${taxable.toFixed(2)}</td>
-        <td style="text-align:right">${cgstAmt.toFixed(2)}</td>
-        <td style="text-align:right">${sgstAmt.toFixed(2)}</td>
-        <td style="text-align:right">${igstAmt.toFixed(2)}</td>
-        <td style="text-align:right">${total.toFixed(2)}</td>
-      </tr>`;
-    })
-    .join("");
-
-  return `
-  <html>
-  <head>
-    <title>${inv.invoiceNumber}</title>
-    <style>
-      @page { size: A4; margin: 20mm; }
-      body { font-family: Arial, sans-serif; font-size: 12px; color: #333; }
-      h2, h3 { margin: 0; padding: 0; }
-      .company { text-align: center; margin-bottom: 20px; }
-      .company h2 { font-size: 18px; font-weight: bold; }
-      .meta { margin-bottom: 10px; }
-      table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-      th, td { border: 1px solid #444; padding: 6px 8px; }
-      th { background: #f2f2f2; text-align: center; }
-      td { vertical-align: top; }
-      .totals { margin-top: 15px; text-align: right; }
-      .totals h3 { font-size: 14px; font-weight: bold; }
-      .footer { margin-top: 40px; text-align: center; font-size: 11px; color: #666; }
-    </style>
-  </head>
-  <body>
-    <div class="company">
-      <h2>${companyDetails.name}</h2>
-      <div>${companyDetails.address}</div>
-      <div>Phone: ${companyDetails.phone} | Email: ${companyDetails.email}</div>
-      <div>Owners: ${companyDetails.owners}</div>
-    </div>
-    <div class="meta">
-      <strong>Invoice:</strong> ${inv.invoiceNumber}<br/>
-      <strong>Date:</strong> ${inv.invoiceDate}<br/>
-      <strong>Due:</strong> ${inv.dueDate || "—"}<br/>
-      <strong>Customer:</strong> ${inv.customerName}<br/>
-      <strong>Address:</strong> ${inv.customerAddress || "—"}<br/>
-      <strong>GSTIN:</strong> ${inv.customerGstin || "—"}
-    </div>
-    <table>
-      <thead>
-        <tr>
-          <th>Description</th>
-          <th>HSN</th>
-          <th>Qty</th>
-          <th>Rate</th>
-          <th>Taxable</th>
-          <th>CGST</th>
-          <th>SGST</th>
-          <th>IGST</th>
-          <th>Total</th>
-        </tr>
-      </thead>
-      <tbody>${itemsHtml}</tbody>
-    </table>
-    <div class="totals">
-      <h3>Grand Total: ${fmtInr(inv.totalAmount || 0)}</h3>
-    </div>
-    <div class="footer">
-      <p>This is a computer-generated invoice. No signature required.</p>
-    </div>
-  </body>
-  </html>`;
-}
-
-// DEBUG sentinel to confirm file parses fully
-console.log("✅ App.js loaded");
