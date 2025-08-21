@@ -1,12 +1,91 @@
+/* index.css */
+
+/* Tailwind base + utilities (make sure you have Tailwind installed and linked in your project) */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-body {
+/* ------------------ GLOBAL ------------------ */
+html, body, #root {
+  height: 100%;
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  padding: 0;
+  font-family: 'Inter', system-ui, sans-serif;
+  background-color: #f9fafb; /* gray-50 */
+  color: #1f2937; /* gray-800 */
+}
+
+/* ------------------ SCROLLBARS ------------------ */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background-color: rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(0, 0, 0, 0.35);
+}
+
+/* ------------------ TABLES ------------------ */
+table {
+  border-collapse: collapse;
+}
+th, td {
+  border-color: #e5e7eb; /* gray-200 */
+}
+
+/* ------------------ PRINT STYLES ------------------ */
+@media print {
+  body {
+    background: #fff !important;
+    color: #000 !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+}
+
+/* A4 print formatting for invoices */
+@page {
+  size: A4;
+  margin: 20mm;
+}
+.print-invoice {
+  font-family: Arial, sans-serif;
+  font-size: 12px;
+  color: #333;
+}
+.print-invoice h2, 
+.print-invoice h3 {
+  margin: 0;
+  padding: 0;
+}
+.print-invoice table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 15px;
+}
+.print-invoice th,
+.print-invoice td {
+  border: 1px solid #444;
+  padding: 6px 8px;
+}
+.print-invoice th {
+  background: #f2f2f2;
+  text-align: center;
+}
+.print-invoice td {
+  vertical-align: top;
+}
+.print-invoice .totals {
+  margin-top: 15px;
+  text-align: right;
+}
+.print-invoice .footer {
+  margin-top: 40px;
+  text-align: center;
+  font-size: 11px;
+  color: #666;
 }

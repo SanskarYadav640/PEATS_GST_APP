@@ -28,6 +28,7 @@ export default function App() {
     const [currentView, setCurrentView] = useState('dashboard');
     const [editingInvoice, setEditingInvoice] = useState(null);
     const [editingCustomer, setEditingCustomer] = useState(null);
+    const [isXlsxLoaded, setIsXlsxLoaded] = useState(false);
 
     // --- Effect to save data to localStorage whenever it changes ---
     useEffect(() => {
@@ -44,6 +45,9 @@ export default function App() {
         const script = document.createElement('script');
         script.src = 'https://cdn.sheetjs.com/xlsx-0.20.1/package/xlsx.full.min.js';
         script.async = true;
+        script.onload = () => {
+            setIsXlsxLoaded(true);
+        };
         document.head.appendChild(script);
 
         return () => {
@@ -136,7 +140,7 @@ export default function App() {
                     existingCustomer={editingCustomer}
                 />;
             case 'reports':
-                return <ReportsView invoices={invoices} customers={customers} />;
+                return <ReportsView invoices={invoices} customers={customers} isXlsxLoaded={isXlsxLoaded} />;
             default:
                 return <DashboardView invoices={invoices} customers={customers} />;
         }
@@ -399,9 +403,9 @@ const CustomerListView = ({ customers, onEdit, onDelete }) => {
     );
 };
 
-const ReportsView = ({ invoices, customers }) => {
+const ReportsView = ({ invoices, customers, isXlsxLoaded }) => {
     const exportToExcel = () => {
-        if (typeof XLSX === 'undefined') {
+        if (!isXlsxLoaded) {
             console.error('Excel library (XLSX) is not loaded yet.');
             alert('Excel library is loading. Please try again in a moment.');
             return;
@@ -485,9 +489,13 @@ ParthaSarthi Engineering and Training Services
         <div className="bg-white p-6 rounded-lg shadow-md">
             <div className="flex justify-between items-center mb-6">
                 <h2 className="text-xl font-semibold text-gray-700">Financial Reports</h2>
-                <button onClick={exportToExcel} className="flex items-center bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600 transition">
+                <button 
+                    onClick={exportToExcel} 
+                    disabled={!isXlsxLoaded}
+                    className={`flex items-center px-4 py-2 rounded-lg transition text-white ${!isXlsxLoaded ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-500 hover:bg-green-600'}`}
+                >
                     <Icon path={ICONS.download} className="w-5 h-5 mr-2" />
-                    Export Master Excel
+                    {isXlsxLoaded ? 'Export Master Excel' : 'Loading...'}
                 </button>
             </div>
             
